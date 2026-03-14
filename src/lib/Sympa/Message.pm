@@ -451,6 +451,120 @@ BEGIN {
     eval 'use Mail::DKIM::TextWrap';    # This doesn't export $VERSION.
 }
 
+# Add Message-Instance v=1 header for DKIM2.
+# Must be called before any message modifications.
+# Returns 1 on success, undef if Mail::DKIM2 is not available.
+sub add_message_instance_ingress {
+    my $self = shift;
+
+    eval { require Mail::DKIM2::MessageInstance };
+    if ($EVAL_ERROR) {
+        $log->syslog('debug', 'Mail::DKIM2::MessageInstance not available');
+        return undef;
+    }
+    eval { require Mail::DKIM::TextWrap };
+
+    my $msg_string = $self->as_rfc822_string;
+
+    my $mi = eval {
+        Mail::DKIM2::MessageInstance->calculate($msg_string);
+    };
+    if ($EVAL_ERROR) {
+        $log->syslog('err', 'Failed to calculate Message-Instance v=1: %s',
+            $EVAL_ERROR);
+        return undef;
+    }
+
+    my $mi_value = _fold_mi_header($mi->as_string);
+    $self->add_header('Message-Instance', $mi_value);
+
+    # Store the original message (with MI v=1 now added) for later
+    # diffing at egress.
+    $self->{mi_original} = $self->as_rfc822_string;
+
+    $log->syslog('debug2', 'Added Message-Instance v=1');
+    return 1;
+}
+
+# Add Message-Instance v=N+1 header for DKIM2 at egress.
+# Takes the original message string (with MI v=1) as argument.
+# Returns 1 on success, undef on failure.
+sub add_message_instance_egress {
+    my $self         = shift;
+    my $mi_original  = shift;
+
+    return undef unless defined $mi_original;
+
+    eval { require Mail::DKIM2::MessageInstance };
+    if ($EVAL_ERROR) {
+        $log->syslog('debug', 'Mail::DKIM2::MessageInstance not available');
+        return undef;
+    }
+    eval { require Mail::DKIM::TextWrap };
+    eval { require Email::MIME };
+
+    my $msg_current = $self->as_rfc822_string;
+
+    # Quick check: if header and body hashes are unchanged, skip MI v=2
+    # entirely.  This avoids expensive recipe computation for messages
+    # that pass through without modification (e.g., no footer configured,
+    # no personalization).
+    my $em_current = Email::MIME->new($msg_current);
+    my $em_original = Email::MIME->new($mi_original);
+    if (Mail::DKIM2::MessageInstance::h_digest($em_current)
+            eq Mail::DKIM2::MessageInstance::h_digest($em_original)
+        and Mail::DKIM2::MessageInstance::b_digest($em_current)
+            eq Mail::DKIM2::MessageInstance::b_digest($em_original)) {
+        $log->syslog('debug2',
+            'Message unchanged, skipping Message-Instance egress');
+        return 1;
+    }
+
+    # calculate() args: ($msg_to_sign, $msg_previous_state)
+    # Hashes are computed on $msg_to_sign (current message).
+    # Recipes allow reconstruction of $msg_previous_state from
+    # $msg_to_sign.
+    my $mi = eval {
+        Mail::DKIM2::MessageInstance->calculate(
+            $msg_current, $mi_original);
+    };
+    if ($EVAL_ERROR) {
+        $log->syslog('err',
+            'Failed to calculate Message-Instance egress: %s',
+            $EVAL_ERROR);
+        return undef;
+    }
+
+    my $mi_value = _fold_mi_header($mi->as_string);
+    $self->add_header('Message-Instance', $mi_value);
+
+    $log->syslog('debug2', 'Added Message-Instance v=%s',
+        $mi->get_tag('v'));
+    return 1;
+}
+
+# Fold a Message-Instance header value for insertion.
+sub _fold_mi_header {
+    my $mi_string = shift;
+
+    eval { require Mail::DKIM::TextWrap };
+    if ($EVAL_ERROR) {
+        return $mi_string;
+    }
+    my $output = '';
+    my $tw = Mail::DKIM::TextWrap->new(
+        Margin    => 72,
+        Break     => qr/./,
+        Separator => "\n\t",
+        Swallow   => qr/\s+/,
+        Output    => \$output,
+    );
+    $tw->add("Message-Instance: " . $mi_string);
+    $tw->finish;
+    $output =~ s/^Message-Instance:\s*//;
+    return $output;
+}
+
 # Old name: tools::dkim_sign() which took string and returned string.
 sub dkim_sign {
     $log->syslog('debug', '(%s)', @_);
@@ -909,6 +1023,24 @@ sub as_string {
 sub body_as_string {
     my $self = shift;
     return $self->{_body};
+}
+
+# Returns the message as an RFC822 string suitable for Message-Instance
+# calculation.  Excludes Sympa internal pseudo-headers and the synthesized
+# Return-Path, and normalizes line endings to CRLF as required for DKIM
+# body canonicalization.
+sub as_rfc822_string {
+    my $self = shift;
+
+    die 'Bug in logic.  Ask developer' unless $self->{_head};
+
+    my $string = $self->{_head}->as_string . "\n"
+        . (defined $self->{_body} ? $self->{_body} : '');
+
+    # Normalize to CRLF for wire format / DKIM canonicalization.
+    $string =~ s/\r?\n/\r\n/g;
+
+    return $string;
 }
 
 sub header_as_string {

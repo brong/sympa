@@ -207,6 +207,12 @@ sub _twist {
         $message->check_smime_signature;
     }
 
+    # Add DKIM2 Message-Instance v=1 before any content modifications,
+    # capturing the original message as received.
+    unless ($message->{_head}->count('Message-Instance')) {
+        $message->add_message_instance_ingress;
+    }
+
     # *** Now message content may be altered. ***
 
     # Enable SMTP logging if required.

@@ -245,6 +245,18 @@ sub __twist_one {
         }
     }
 
+    # Add DKIM2 Message-Instance after all content transformations
+    # but before DKIM signing.
+    if (defined $message->{mi_original}) {
+        # Relayed message: add MI v=N+1 with recipes to reconstruct
+        # the original message captured at ingress.
+        $message->add_message_instance_egress($message->{mi_original});
+    } elsif (!$message->{_head}->count('Message-Instance')) {
+        # Internally generated message (notifications, digests, etc.):
+        # Sympa is the originator, so add MI v=1.
+        $message->add_message_instance_ingress;
+    }
+
     if ($rm_sig) {
         # If it is set up, remove header fields related to DKIM signature
         # given by upstream MTAs.
