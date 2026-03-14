@@ -1860,6 +1860,37 @@ sub decorate {
             ) {
                 $entity->sync_headers(Length => 'COMPUTE')
                     if $entity->head->get('Content-Length');
+            } else {
+                # Inline append failed (e.g. charset can't represent
+                # the combined content, or non-decodable encoding).
+                # Fall back to adding footers as separate MIME parts,
+                # converting single-part to multipart/mixed.  This
+                # preserves the original body bytes untouched.
+                $log->syslog('info',
+                    'Inline footer append failed, falling back to MIME parts'
+                );
+                if ($header and -s $header) {
+                    _add_footer_part(
+                        $entity, $header, $list, $rcpt, $data,
+                        mode    => $mode,
+                        type    => 'header',
+                        prepend => 1
+                    );
+                }
+                if ($footer and -s $footer) {
+                    _add_footer_part(
+                        $entity, $footer, $list, $rcpt, $data,
+                        mode => $mode,
+                        type => 'footer'
+                    );
+                }
+                if ($global_footer and -s $global_footer) {
+                    _add_footer_part(
+                        $entity, $global_footer, $list, $rcpt, $data,
+                        mode => $mode,
+                        type => 'global footer'
+                    );
+                }
             }
         }
     } else {
