@@ -35,6 +35,13 @@ sub _twist {
     my $self    = shift;
     my $message = shift;
 
+    # Add DKIM2 Message-Instance v=1 if not already present.
+    # Messages going through this path bypass ProcessOutgoing,
+    # so this is the last chance to add MI before delivery.
+    unless ($message->{_head}->count('Message-Instance')) {
+        $message->add_message_instance_ingress;
+    }
+
     # ToDo: Consider envid and tag.
     return Sympa::Mailer->instance->store($message, $message->{rcpt})
         ? 1

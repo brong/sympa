@@ -154,6 +154,15 @@ sub next {
             if ($message) {
                 my $rcpt_string = do { local $RS; <$lock_fh> };
                 $message->{rcpt} = [split /\n+/, $rcpt_string];
+
+                # Load MI original for DKIM2 Message-Instance diffing.
+                my $mi_orig_path = $self->{msg_directory} . '/'
+                    . $msg_file . '.mi_orig';
+                if (-f $mi_orig_path
+                    and open my $mi_fh, '<', $mi_orig_path) {
+                    $message->{mi_original} = do { local $RS; <$mi_fh> };
+                    close $mi_fh;
+                }
             }
         }
 
@@ -188,6 +197,7 @@ sub quarantine {
     if (rmdir($self->{pct_directory} . '/' . $marshalled)) {
         # No more packet.
         unlink($self->{msg_directory} . '/' . $marshalled);
+        unlink($self->{msg_directory} . '/' . $marshalled . '.mi_orig');
     }
     return 1;
 }
@@ -202,6 +212,7 @@ sub remove {
         if (rmdir($self->{pct_directory} . '/' . $marshalled)) {
             # No more packet.
             unlink($self->{msg_directory} . '/' . $marshalled);
+            unlink($self->{msg_directory} . '/' . $marshalled . '.mi_orig');
         }
         return 1;
     }
@@ -266,6 +277,35 @@ sub store {
         %options
     );
     return unless $marshalled;
+
+    # Store the MI original message for DKIM2 Message-Instance diffing
+    # at egress.  Hard link to an existing copy if the caller provides
+    # orig_msg with a recorded path, to avoid duplicating the (identical)
+    # data for each spool entry of the same message.
+    if (defined $message->{mi_original}) {
+        my $mi_orig_path = $self->{msg_directory} . '/' . $marshalled
+            . '.mi_orig';
+        my $linked = 0;
+        my $orig_msg = $options{orig_msg};
+        if ($orig_msg
+            and defined $orig_msg->{_mi_orig_path}
+            and -f $orig_msg->{_mi_orig_path}) {
+            $linked = link($orig_msg->{_mi_orig_path}, $mi_orig_path);
+        }
+        unless ($linked) {
+            if (open my $mi_fh, '>', $mi_orig_path) {
+                print $mi_fh $message->{mi_original};
+                close $mi_fh;
+            } else {
+                $log->syslog('err', 'Cannot write MI original %s: %m',
+                    $mi_orig_path);
+            }
+        }
+        # Record path on the original message for future hard linking.
+        if ($orig_msg) {
+            $orig_msg->{_mi_orig_path} //= $mi_orig_path;
+        }
+    }
 
     unless (mkdir($self->{pct_directory} . '/' . $marshalled)) {
         $log->syslog(
