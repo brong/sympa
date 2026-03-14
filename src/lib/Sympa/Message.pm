@@ -39,6 +39,7 @@ use MIME::EncWords;
 use MIME::Entity;
 use MIME::Field::ParamVal;
 use MIME::Parser;
+use MIME::QuotedPrint;
 use MIME::Tools;
 use Scalar::Util qw();
 use Text::LineFold;
@@ -991,9 +992,25 @@ sub set_entity {
     my $new  = $entity->as_string;
 
     if ($orig ne $new) {
+        my $old_body = $self->{_body};
         $self->{_head} = $entity->head;
         $self->{_body} = $entity->body_as_string;
         $self->{_entity_cache} = $entity;    # Also update entity cache.
+
+        # For single-part base64 messages, restore original line
+        # wrapping for unchanged base64 characters.  MIME::Entity
+        # re-encodes at 76-char lines, which changes every line if
+        # the sender used a different length.  The original wrapping
+        # survives only in the old _body string.
+        if (defined $old_body
+            and !$entity->is_multipart
+            and ($entity->head->mime_encoding || '') =~ /^base64$/i) {
+            my $fixed = _restore_b64_wrapping($old_body, $self->{_body});
+            if (defined $fixed) {
+                $self->{_body} = $fixed;
+                delete $self->{_entity_cache};
+            }
+        }
     }
 
     return $entity;
@@ -2185,6 +2202,89 @@ sub _append_parts {
     return undef;
 }
 
+# Restore original base64 line wrapping after MIME::Entity re-encodes.
+#
+# Takes the original raw base64 body (with sender's line wrapping) and
+# the new raw base64 body (re-encoded at standard 76-char lines).
+# Diffs the flat (whitespace-stripped) base64 strings and reconstructs
+# the output preserving original line breaks for unchanged regions.
+#
+# This handles prepended headers, appended footers, and inline
+# substitutions — any change anywhere in the decoded content.
+sub _restore_b64_wrapping {
+    my ($orig_raw, $new_raw) = @_;
+
+    # Strip whitespace to get flat base64 strings.
+    (my $orig_flat = $orig_raw) =~ s/\s+//g;
+    (my $new_flat  = $new_raw)  =~ s/\s+//g;
+
+    return undef if $orig_flat eq $new_flat;    # Nothing to do.
+
+    # Detect original line length from the first complete line.
+    my $orig_line_len = 76;
+    if ($orig_raw =~ /^([^\r\n]+)\r?\n/) {
+        $orig_line_len = length($1);
+    }
+
+    # Build a map from flat-position to raw-position in the original,
+    # so we can emit original bytes (including line breaks) for
+    # unchanged regions.
+    my @orig_raw_chars = split //, $orig_raw;
+    my @flat_to_raw;    # flat_pos -> raw_pos
+    for my $i (0 .. $#orig_raw_chars) {
+        next if $orig_raw_chars[$i] =~ /\s/;
+        push @flat_to_raw, $i;
+    }
+
+    # Diff the flat base64 strings character-by-character using
+    # Algorithm::Diff to find matching blocks.
+    my @orig_chars = split //, $orig_flat;
+    my @new_chars  = split //, $new_flat;
+
+    require Algorithm::Diff;
+    my $diff = Algorithm::Diff->new(\@orig_chars, \@new_chars);
+    $diff->Base(0);
+
+    my $result = '';
+    my $col = 0;    # Current column for wrapping new content.
+
+    while ($diff->Next()) {
+        if ($diff->Same()) {
+            # Unchanged region: emit from original raw, preserving
+            # line breaks.
+            my $min1 = $diff->Min(1);
+            my $max1 = $diff->Max(1);
+            # Map flat positions back to raw positions.
+            my $raw_start = $flat_to_raw[$min1];
+            my $raw_end   = $flat_to_raw[$max1];
+            my $chunk = substr($orig_raw,
+                $raw_start, $raw_end - $raw_start + 1);
+            $result .= $chunk;
+            # Track column position after emitting.
+            if ($chunk =~ /([^\r\n]*)\z/) {
+                $col = length($1);
+            }
+        } else {
+            # Changed region: emit new base64 chars with consistent
+            # line wrapping.
+            my @items = $diff->Items(2);
+            for my $ch (@items) {
+                if ($col >= $orig_line_len) {
+                    $result .= "\n";
+                    $col = 0;
+                }
+                $result .= $ch;
+                $col++;
+            }
+        }
+    }
+
+    # Ensure trailing newline.
+    $result .= "\n" unless $result =~ /\n\z/;
+
+    return $result;
+}
+
 sub _add_footer_part {
     my $entity  = shift;
     my $footer  = shift;
@@ -2279,6 +2379,71 @@ sub _append_footer_header_to_part {
     }
     $in_cset->encoder($in_cset);    # no charset conversion
 
+    my $cte = uc($entity->head->mime_attr('Content-Transfer-Encoding') || '');
+
+    # For quoted-printable text/plain, concatenate at the raw QP-encoded
+    # level.  Only the header/footer text is freshly QP-encoded; the
+    # original body lines remain byte-identical.  This preserves the
+    # original sender's QP choices (e.g. unnecessarily-quoted characters,
+    # non-standard soft line break positions) and produces compact
+    # Message-Instance body recipes (a single copy range for the
+    # original body).
+    if ($eff_type eq 'text/plain' and $cte eq 'QUOTED-PRINTABLE') {
+        my $raw_qp = $entity->body_as_string;
+
+        # Encode header/footer as QP in the message's charset.
+        my @parts;
+        for my $text ($header_msg, $footer_msg, $global_footer_msg) {
+            next unless defined $text and length $text;
+            # Encode text to message charset bytes, then QP-encode.
+            my $bytes = eval {
+                Encode::encode($in_cset->as_string,
+                    Encode::decode_utf8($text, 1));
+            };
+            if ($EVAL_ERROR) {
+                # Charset can't represent the footer text — fall through
+                # to the standard decode-concatenate-reencode path below.
+                undef @parts;
+                last;
+            }
+            push @parts, MIME::QuotedPrint::encode_qp($bytes);
+        }
+
+        if (@parts or (!length($header_msg // '')
+                    and !length($footer_msg // '')
+                    and !length($global_footer_msg // ''))) {
+            # Build the concatenated QP body.
+            my $qp_header = shift @parts // '';
+            my $qp_footer = shift @parts // '';
+            my $qp_global_footer = shift @parts // '';
+
+            # Ensure newlines between parts.
+            if (length $qp_header and $qp_header !~ /\n\z/) {
+                $qp_header .= "\n";
+            }
+            if (length $qp_footer and $raw_qp !~ /\n\z/) {
+                $raw_qp .= "\n";
+            }
+            if (length $qp_global_footer) {
+                my $prev = length $qp_footer ? $qp_footer : $raw_qp;
+                if ($prev !~ /\n\z/) {
+                    $qp_footer .= "\n" if length $qp_footer;
+                }
+            }
+            if (length $qp_footer and $qp_footer !~ /\n\z/) {
+                $qp_footer .= "\n";
+            }
+            if (length $qp_global_footer
+                and $qp_global_footer !~ /\n\z/) {
+                $qp_global_footer .= "\n";
+            }
+
+            return $qp_header . $raw_qp . $qp_footer . $qp_global_footer;
+        }
+        # If QP encoding of footer failed (charset mismatch), fall
+        # through to the standard path below.
+    }
+
     # Decode body to Unicode, since Sympa::Tools::Text::encode_html() and
     # newline normalization will break texts with several character sets
     # (UTF-16/32, ISO-2022-JP, ...).
@@ -2311,8 +2476,7 @@ sub _append_footer_header_to_part {
         if (length $global_footer_msg) {
             $global_footer_msg .= "\n" unless $global_footer_msg =~ /\n\z/;
         }
-        if (uc($entity->head->mime_attr('Content-Transfer-Encoding') || '')
-            eq 'BASE64') {
+        if ($cte eq 'BASE64') {
             $header_msg =~ s/\r\n|\r|\n/\r\n/g;
             $body =~ s/(\r\n|\r|\n)\z/\r\n/;    # only at end
             $footer_msg =~ s/\r\n|\r|\n/\r\n/g;
