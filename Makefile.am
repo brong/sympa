@@ -34,6 +34,7 @@ check_SCRIPTS = \
 	t/HTML_URIFind.t \
 	t/Language.t \
 	t/LockedFile.t \
+	t/Message_DKIM2.t \
 	t/Message_smime.t \
 	t/Message_urlize.t \
 	t/Regexps.t \

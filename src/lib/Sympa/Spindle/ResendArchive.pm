@@ -100,6 +100,21 @@ sub _twist {
     # If encrypted, it will be re-encrypted by succeeding processes.
     $message->smime_decrypt;
 
+    # For DKIM2 Message-Instance support: if the archived message has
+    # MI headers (added at original ingress) but no mi_original snapshot
+    # (since it didn't go through ProcessIncoming on this path), set
+    # mi_original from the current archived state.  This is the best
+    # reference point we have for the resend case -- it captures the
+    # message as it was when archived.  If the message has no MI headers
+    # (archived before DKIM2 support), add MI v=1 now.
+    unless (defined $message->{mi_original}) {
+        if ($message->{_head}->count('Message-Instance')) {
+            $message->{mi_original} = $message->as_rfc822_string;
+        } else {
+            $message->add_message_instance_ingress;
+        }
+    }
+
     # Assign privileges of resending user to the message.
     $message->{envelope_sender} = $self->{resent_by};
 
