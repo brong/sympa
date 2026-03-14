@@ -1613,8 +1613,17 @@ sub _merge_msg {
             return $entity;
         }
 
+        my $orig_utf8_body = $utf8_body;
         $utf8_body = personalize_text($utf8_body, $list, $rcpt, $data);
         return $entity unless defined $utf8_body;
+
+        # If personalization didn't change anything, skip re-encoding
+        # to preserve original wire bytes (important for DKIM/DKIM2
+        # signature stability and avoiding non-deterministic re-encoding
+        # of base64/quoted-printable content).
+        if ($utf8_body eq $orig_utf8_body) {
+            return $entity;
+        }
 
         ## Data not encodable by original charset will fallback to UTF-8.
         my ($newcharset, $newenc);
