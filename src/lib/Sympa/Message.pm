@@ -1625,11 +1625,22 @@ sub _merge_msg {
             return $entity;
         }
 
-        ## Data not encodable by original charset will fallback to UTF-8.
+        # Try encoding in original charset first, to avoid unnecessary
+        # charset/CTE changes that would alter wire bytes.
         my ($newcharset, $newenc);
-        ($body, $newcharset, $newenc) =
-            $in_cset->body_encode(Encode::decode_utf8($utf8_body),
-            Replacement => 'FALLBACK');
+        my $decoded_utf8 = Encode::decode_utf8($utf8_body);
+        eval {
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($decoded_utf8);
+        };
+        if ($EVAL_ERROR or !$newcharset
+            or $newcharset ne $in_cset->as_string) {
+            # Original charset can't represent the new content;
+            # fall back to UTF-8.
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($decoded_utf8,
+                Replacement => 'FALLBACK');
+        }
         unless ($newcharset) {    # bug in MIME::Charset?
             $log->syslog('err', 'Can\'t determine output charset');
             return undef;
@@ -2147,10 +2158,20 @@ sub _append_footer_header_to_part {
 
         $new_body = $header_msg . $body . $footer_msg . $global_footer_msg;
 
-        ## Data not encodable by original charset will fallback to UTF-8.
+        # Try encoding in original charset first, to avoid unnecessary
+        # charset/CTE changes that would alter wire bytes.
         my ($newcharset, $newenc);
-        ($body, $newcharset, $newenc) =
-            $in_cset->body_encode($new_body, Replacement => 'FALLBACK');
+        eval {
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($new_body);
+        };
+        if ($EVAL_ERROR or !$newcharset
+            or $newcharset ne $in_cset->as_string) {
+            # Original charset can't represent the new content;
+            # fall back to UTF-8.
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($new_body, Replacement => 'FALLBACK');
+        }
         unless ($newcharset) {                  # bug in MIME::Charset?
             $log->syslog('err', 'Can\'t determine output charset');
             return undef;
