@@ -406,6 +406,14 @@ sub add_header {
     delete $self->{_entity_cache};    # Clear entity cache.
 }
 
+# Prepend a header at the top of the message (position 0).
+sub prepend_header {
+    my ($self, $name, $value) = @_;
+    # Mail::Header::add with INDEX=0 inserts at position 0.
+    $self->{_head}->add($name, $value, 0);
+    delete $self->{_entity_cache};
+}
+
 sub delete_header {
     my $self = shift;
     $self->{_head}->delete(@_);
@@ -452,6 +460,21 @@ BEGIN {
     eval 'use Mail::DKIM::TextWrap';    # This doesn't export $VERSION.
 }
 
+# DKIM2 implementation metadata — update DKIM2_DATE on each change.
+use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-00';
+use constant DKIM2_REPO     => 'github.com/brong/sympa';
+use constant DKIM2_DATE     => '2026-03-25';
+use constant DKIM2_SOFTWARE => 'sympa';
+
+sub _dkim2_info {
+    my ($action) = @_;
+    return "draft=" . DKIM2_DRAFT
+         . ";\r\n\trepo=" . DKIM2_REPO
+         . ";\r\n\tdate=" . DKIM2_DATE
+         . "; sw=" . DKIM2_SOFTWARE
+         . ";\r\n\taction=$action";
+}
+
 # Add Message-Instance v=1 header for DKIM2.
 # Must be called before any message modifications.
 # Returns 1 on success, undef if Mail::DKIM2 is not available.
@@ -477,9 +500,10 @@ sub add_message_instance_ingress {
     }
 
     my $mi_value = _fold_mi_header($mi->as_string);
-    $self->add_header('Message-Instance', $mi_value);
+    $self->prepend_header('X-DKIM2-Info', _dkim2_info('mi-m1'));
+    $self->prepend_header('Message-Instance', $mi_value);
 
-    # Store the original message (with MI v=1 now added) for later
+    # Store the original message (with MI m=1 now added) for later
     # diffing at egress.
     $self->{mi_original} = $self->as_rfc822_string;
 
@@ -537,10 +561,11 @@ sub add_message_instance_egress {
     }
 
     my $mi_value = _fold_mi_header($mi->as_string);
-    $self->add_header('Message-Instance', $mi_value);
+    my $version = $mi->get_tag('m');
+    $self->prepend_header('X-DKIM2-Info', _dkim2_info("mi-m$version"));
+    $self->prepend_header('Message-Instance', $mi_value);
 
-    $log->syslog('debug2', 'Added Message-Instance v=%s',
-        $mi->get_tag('v'));
+    $log->syslog('debug2', 'Added Message-Instance m=%s', $version);
     return 1;
 }
 

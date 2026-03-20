@@ -207,9 +207,13 @@ sub _twist {
         $message->check_smime_signature;
     }
 
-    # Add DKIM2 Message-Instance v=1 before any content modifications,
+    # Add DKIM2 Message-Instance m=1 before any content modifications,
     # capturing the original message as received.
-    unless ($message->{_head}->count('Message-Instance')) {
+    if ($message->{_head}->count('Message-Instance')) {
+        # MI already present (e.g. from inbound milter) — store the
+        # current message state for egress diff computation.
+        $message->{mi_original} = $message->as_rfc822_string;
+    } else {
         $message->add_message_instance_ingress;
     }
 
