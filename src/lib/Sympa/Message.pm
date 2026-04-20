@@ -536,6 +536,15 @@ sub add_message_instance_egress {
     # no personalization).
     my $em_current = Email::MIME->new($msg_current);
     my $em_original = Email::MIME->new($mi_original);
+
+    # Verify the incoming top MI matches the original message content.
+    # Defence-in-depth: edge milter already verified, but check here too.
+    unless (Mail::DKIM2::MessageInstance->verify($em_original)) {
+        $log->syslog('warning',
+            'Incoming MI fails verification — skipping MI egress');
+        return undef;
+    }
+
     if (Mail::DKIM2::MessageInstance::h_digest($em_current)
             eq Mail::DKIM2::MessageInstance::h_digest($em_original)
         and Mail::DKIM2::MessageInstance::b_digest($em_current)
