@@ -109,6 +109,20 @@ subtest 'MI v=1 on plain message' => sub {
     is $version, 1, 'MI v=1 verifies correctly';
     is $error, undef, 'no verification error';
 
+    # The X-DKIM2-Info describing the MI sits directly above it.
+    like $rfc822, qr/^X-DKIM2-Info:[^\n]*(?:\n[ \t][^\n]*)*\nMessage-Instance:/m,
+        'X-DKIM2-Info immediately above Message-Instance v=1';
+    # draft-gondwana-dkim2-debug-header-01: a tag-list in the DKIM2 syntax,
+    # every tag followed by ";", and the instance action is mi-m=<N>.
+    my ($info) = $rfc822 =~ /^X-DKIM2-Info:[ \t]*((?:[^\n]|\n[ \t])*)/m;
+    $info =~ s/\r?\n[ \t]+/ /g;      # unfold (the message may be CRLF)
+    $info =~ s/\s+\z//;
+    $info =~ s/([;,])[ \t]+/$1/g;    # a consumer ignores WSP next to ; and ,
+    $info =~ s/;(?=.)/; /g;
+    like $info,
+        qr/^draft=\S+; repo=\S+; date=\d{4}-\d\d-\d\d; sw=sympa; action=mi-m=1; hc=\d+; hn=\S+;\z/,
+        'X-DKIM2-Info is a tag-list with every tag followed by ";"';
+
     # mi_original should be stored.
     ok defined $msg->{mi_original}, 'mi_original is stored';
     like $msg->{mi_original}, qr/Message-Instance/,
@@ -206,6 +220,11 @@ subtest 'MI v=2 captures header additions' => sub {
 
     # Verify v=2 against current message.
     my $rfc822 = $msg->as_rfc822_string;
+
+    # The new X-DKIM2-Info (mi-m=2) sits directly above the new MI.
+    like $rfc822,
+        qr/^X-DKIM2-Info:(?:[^\n]|\n[ \t])*?action=mi-m=2;(?:[^\n]|\n[ \t])*\nMessage-Instance:/m,
+        'X-DKIM2-Info mi-m=2 immediately above Message-Instance v=2';
     my ($version, $error) = Mail::DKIM2::MessageInstance->verify($rfc822);
     is $version, 2, 'MI v=2 verifies correctly';
     is $error, undef, 'no verification error';
