@@ -463,16 +463,38 @@ BEGIN {
 # DKIM2 implementation metadata — update DKIM2_DATE on each change.
 use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-01';
 use constant DKIM2_REPO     => 'github.com/brong/sympa';
-use constant DKIM2_DATE     => '2026-04-20';
+use constant DKIM2_DATE     => '2026-04-22';
 use constant DKIM2_SOFTWARE => 'sympa';
 
 sub _dkim2_info {
-    my ($action) = @_;
-    return "draft=" . DKIM2_DRAFT
-         . ";\r\n\trepo=" . DKIM2_REPO
-         . ";\r\n\tdate=" . DKIM2_DATE
-         . "; sw=" . DKIM2_SOFTWARE
-         . ";\r\n\taction=$action";
+    my ($action, %extra) = @_;
+    my $val = "draft=" . DKIM2_DRAFT
+            . ";\r\n\trepo=" . DKIM2_REPO
+            . ";\r\n\tdate=" . DKIM2_DATE
+            . "; sw=" . DKIM2_SOFTWARE
+            . ";\r\n\taction=$action";
+    for my $key (sort keys %extra) {
+        next unless defined $extra{$key};
+        $val .= "; $key=$extra{$key}";
+    }
+    return $val;
+}
+
+sub _header_list_for_hash {
+    my ($msg_string) = @_;
+    eval { require Email::MIME };
+    return (0, '') if $EVAL_ERROR;
+    eval { require Mail::DKIM2::Common };
+    return (0, '') if $EVAL_ERROR;
+
+    my $em = Email::MIME->new($msg_string);
+    my @names;
+    for my $header (sort { lc($a) cmp lc($b) } $em->header_names) {
+        next if Mail::DKIM2::Common::should_skip($header);
+        my @vals = $em->header_raw($header);
+        push @names, (lc($header)) x scalar(@vals);
+    }
+    return (scalar(@names), join(',', @names));
 }
 
 # Add Message-Instance v=1 header for DKIM2.
@@ -500,7 +522,9 @@ sub add_message_instance_ingress {
     }
 
     my $mi_value = _fold_mi_header($mi->as_string);
-    $self->prepend_header('X-DKIM2-Info', _dkim2_info('mi-m1'));
+    my ($hc, $hn) = _header_list_for_hash($msg_string);
+    $self->prepend_header('X-DKIM2-Info',
+        _dkim2_info('mi-m1', hc => $hc, hn => $hn));
     $self->prepend_header('Message-Instance', $mi_value);
 
     # Store the original message (with MI m=1 now added) for later
@@ -571,7 +595,9 @@ sub add_message_instance_egress {
 
     my $mi_value = _fold_mi_header($mi->as_string);
     my $version = $mi->get_tag('m');
-    $self->prepend_header('X-DKIM2-Info', _dkim2_info("mi-m$version"));
+    my ($hc, $hn) = _header_list_for_hash($msg_current);
+    $self->prepend_header('X-DKIM2-Info',
+        _dkim2_info("mi-m$version", hc => $hc, hn => $hn));
     $self->prepend_header('Message-Instance', $mi_value);
 
     $log->syslog('debug2', 'Added Message-Instance m=%s', $version);
