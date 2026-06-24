@@ -461,9 +461,9 @@ BEGIN {
 }
 
 # DKIM2 implementation metadata — update DKIM2_DATE on each change.
-use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-02';
+use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-03';
 use constant DKIM2_REPO     => 'github.com/brong/sympa';
-use constant DKIM2_DATE     => '2026-05-17';
+use constant DKIM2_DATE     => '2026-06-24';
 use constant DKIM2_SOFTWARE => 'sympa';
 
 sub _dkim2_info {
