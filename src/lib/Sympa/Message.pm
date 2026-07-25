@@ -469,15 +469,27 @@ use constant DKIM2_SOFTWARE => 'sympa';
 sub _dkim2_info {
     my ($action, %extra) = @_;
     my $val = "draft=" . DKIM2_DRAFT
-            . ";\r\n\trepo=" . DKIM2_REPO
-            . ";\r\n\tdate=" . DKIM2_DATE
+            . "; repo=" . DKIM2_REPO
+            . "; date=" . DKIM2_DATE
             . "; sw=" . DKIM2_SOFTWARE
-            . ";\r\n\taction=$action";
+            . "; action=$action";
     for my $key (sort keys %extra) {
         next unless defined $extra{$key};
         $val .= "; $key=$extra{$key}";
     }
-    return $val;
+    # Fold at tag boundaries.  Previously only the first three tags were folded
+    # and everything from action= onwards ran into a single line, which the hn=
+    # list of hashed header names pushes well past the RFC 5322 recommendation
+    # of 78 -- a list message reaches 200+ characters.  X-DKIM2-Info is excluded
+    # from the header hash by the x-* rule, so folding it cannot affect a
+    # signature.
+    eval { require Mail::DKIM2::Common };
+    return $val if $EVAL_ERROR;
+    # fold_header() budgets for the field name, so fold with it attached and
+    # strip it back off -- callers insert the value alone.
+    my $folded = Mail::DKIM2::Common::fold_header("X-DKIM2-Info: $val");
+    $folded =~ s/^X-DKIM2-Info:\s*//;
+    return $folded;
 }
 
 sub _header_list_for_hash {
