@@ -418,8 +418,11 @@ sub _mail_message {
     # Overwrite original envelope sender.  It is REQUIRED for delivery.
     $message->{envelope_sender} = Sympa::get_address($list, 'return_path');
 
-    return Sympa::Spool::Outgoing->new->store($message, $rcpt, tag => $tag)
-        || undef;
+    return Sympa::Spool::Outgoing->new->store(
+        $message, $rcpt,
+        tag      => $tag,
+        orig_msg => $message,
+    ) || undef;
 }
 
 1;

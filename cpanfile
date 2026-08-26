@@ -153,7 +153,8 @@ requires 'Time::Local', '>= 1.23';
 requires 'Unicode::Normalize', '>= 1.03';
 
 # Sanitizes inputs with Unicode text.
-requires 'Unicode::UTF8', '>= 0.58';
+# Note: valid_utf8() has been introduced by 0.60.
+requires 'Unicode::UTF8', '>= 0.60';
 
 # Used to create URI containing non URI-canonical characters.
 # Note: '3.28' is the version included in URI-1.35.
@@ -165,6 +166,9 @@ requires 'URI::Escape', '>= 3.28';
 # Used to parse list configuration templates and instanciate list families
 # libxml2-devel is needed to build the Perl code
 requires 'XML::LibXML', '>= 1.70';
+
+# Used for adding HTML tags to URI in message footers/headers:
+requires 'URI::Find::Schemeless', '20160806';
 
 ### Recommendations
 ##

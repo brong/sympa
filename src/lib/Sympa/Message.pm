@@ -39,6 +39,7 @@ use MIME::EncWords;
 use MIME::Entity;
 use MIME::Field::ParamVal;
 use MIME::Parser;
+use MIME::QuotedPrint;
 use MIME::Tools;
 use Scalar::Util qw();
 use Text::LineFold;
@@ -51,6 +52,7 @@ use Sympa;
 use Conf;
 use Sympa::Constants;
 use Sympa::HTML::FormatText;
+use Sympa::HTML::URIFind;
 use Sympa::HTMLSanitizer;
 use Sympa::Language;
 use Sympa::Log;
@@ -404,6 +406,14 @@ sub add_header {
     delete $self->{_entity_cache};    # Clear entity cache.
 }
 
+# Prepend a header at the top of the message (position 0).
+sub prepend_header {
+    my ($self, $name, $value) = @_;
+    # Mail::Header::add with INDEX=0 inserts at position 0.
+    $self->{_head}->add($name, $value, 0);
+    delete $self->{_entity_cache};
+}
+
 sub delete_header {
     my $self = shift;
     $self->{_head}->delete(@_);
@@ -448,6 +458,184 @@ BEGIN {
     eval 'use Mail::DKIM::Signer';
     eval 'use Mail::DKIM::ARC::Signer';
     eval 'use Mail::DKIM::TextWrap';    # This doesn't export $VERSION.
+}
+
+# DKIM2 implementation metadata — update DKIM2_DATE on each change.
+use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-05';
+use constant DKIM2_REPO     => 'github.com/brong/sympa';
+use constant DKIM2_DATE     => '2026-08-25';
+use constant DKIM2_SOFTWARE => 'sympa';
+
+sub _dkim2_info {
+    my ($action, %extra) = @_;
+    my $val = "draft=" . DKIM2_DRAFT
+            . "; repo=" . DKIM2_REPO
+            . "; date=" . DKIM2_DATE
+            . "; sw=" . DKIM2_SOFTWARE
+            . "; action=$action";
+    for my $key (sort keys %extra) {
+        next unless defined $extra{$key};
+        $val .= "; $key=$extra{$key}";
+    }
+    # Fold at tag boundaries.  Previously only the first three tags were folded
+    # and everything from action= onwards ran into a single line, which the hn=
+    # list of hashed header names pushes well past the RFC 5322 recommendation
+    # of 78 -- a list message reaches 200+ characters.  X-DKIM2-Info is excluded
+    # from the header hash by the x-* rule, so folding it cannot affect a
+    # signature.
+    eval { require Mail::DKIM2::Common };
+    return $val if $EVAL_ERROR;
+    # fold_header() budgets for the field name, so fold with it attached and
+    # strip it back off -- callers insert the value alone.
+    my $folded = Mail::DKIM2::Common::fold_header("X-DKIM2-Info: $val");
+    $folded =~ s/^X-DKIM2-Info:\s*//;
+    return $folded;
+}
+
+sub _header_list_for_hash {
+    my ($msg_string) = @_;
+    eval { require Email::MIME };
+    return (0, '') if $EVAL_ERROR;
+    eval { require Mail::DKIM2::Common };
+    return (0, '') if $EVAL_ERROR;
+
+    my $em = Email::MIME->new($msg_string);
+    my @names;
+    for my $header (sort { lc($a) cmp lc($b) } $em->header_names) {
+        next if Mail::DKIM2::Common::should_skip($header);
+        my @vals = $em->header_raw($header);
+        push @names, (lc($header)) x scalar(@vals);
+    }
+    return (scalar(@names), join(',', @names));
+}
+
+# Add Message-Instance v=1 header for DKIM2.
+# Must be called before any message modifications.
+# Returns 1 on success, undef if Mail::DKIM2 is not available.
+sub add_message_instance_ingress {
+    my $self = shift;
+
+    eval { require Mail::DKIM2::MessageInstance };
+    if ($EVAL_ERROR) {
+        $log->syslog('debug', 'Mail::DKIM2::MessageInstance not available');
+        return undef;
+    }
+    eval { require Mail::DKIM::TextWrap };
+
+    my $msg_string = $self->as_rfc822_string;
+
+    my $mi = eval {
+        Mail::DKIM2::MessageInstance->calculate($msg_string);
+    };
+    if ($EVAL_ERROR) {
+        $log->syslog('err', 'Failed to calculate Message-Instance v=1: %s',
+            $EVAL_ERROR);
+        return undef;
+    }
+
+    my $mi_value = _fold_mi_header($mi->as_string);
+    my ($hc, $hn) = _header_list_for_hash($msg_string);
+    $self->prepend_header('X-DKIM2-Info',
+        _dkim2_info('mi-m1', hc => $hc, hn => $hn));
+    $self->prepend_header('Message-Instance', $mi_value);
+
+    # Store the original message (with MI m=1 now added) for later
+    # diffing at egress.
+    $self->{mi_original} = $self->as_rfc822_string;
+
+    $log->syslog('debug2', 'Added Message-Instance v=1');
+    return 1;
+}
+
+# Add Message-Instance v=N+1 header for DKIM2 at egress.
+# Takes the original message string (with MI v=1) as argument.
+# Returns 1 on success, undef on failure.
+sub add_message_instance_egress {
+    my $self         = shift;
+    my $mi_original  = shift;
+
+    return undef unless defined $mi_original;
+
+    eval { require Mail::DKIM2::MessageInstance };
+    if ($EVAL_ERROR) {
+        $log->syslog('debug', 'Mail::DKIM2::MessageInstance not available');
+        return undef;
+    }
+    eval { require Mail::DKIM::TextWrap };
+    eval { require Email::MIME };
+
+    my $msg_current = $self->as_rfc822_string;
+
+    # Quick check: if header and body hashes are unchanged, skip MI v=2
+    # entirely.  This avoids expensive Recipe computation for messages
+    # that pass through without modification (e.g., no footer configured,
+    # no personalization).
+    my $em_current = Email::MIME->new($msg_current);
+    my $em_original = Email::MIME->new($mi_original);
+
+    # Verify the incoming top MI matches the original message content.
+    # Defence-in-depth: edge milter already verified, but check here too.
+    unless (Mail::DKIM2::MessageInstance->verify($em_original)) {
+        $log->syslog('warning',
+            'Incoming MI fails verification — skipping MI egress');
+        return undef;
+    }
+
+    if (Mail::DKIM2::MessageInstance::h_digest($em_current)
+            eq Mail::DKIM2::MessageInstance::h_digest($em_original)
+        and Mail::DKIM2::MessageInstance::b_digest($em_current)
+            eq Mail::DKIM2::MessageInstance::b_digest($em_original)) {
+        $log->syslog('debug2',
+            'Message unchanged, skipping Message-Instance egress');
+        return 1;
+    }
+
+    # calculate() args: ($msg_to_sign, $msg_previous_state)
+    # Hashes are computed on $msg_to_sign (current message).
+    # Recipes allow reconstruction of $msg_previous_state from
+    # $msg_to_sign.
+    my $mi = eval {
+        Mail::DKIM2::MessageInstance->calculate(
+            $msg_current, $mi_original);
+    };
+    if ($EVAL_ERROR) {
+        $log->syslog('err',
+            'Failed to calculate Message-Instance egress: %s',
+            $EVAL_ERROR);
+        return undef;
+    }
+
+    my $mi_value = _fold_mi_header($mi->as_string);
+    my $version = $mi->get_tag('m');
+    my ($hc, $hn) = _header_list_for_hash($msg_current);
+    $self->prepend_header('X-DKIM2-Info',
+        _dkim2_info("mi-m$version", hc => $hc, hn => $hn));
+    $self->prepend_header('Message-Instance', $mi_value);
+
+    $log->syslog('debug2', 'Added Message-Instance m=%s', $version);
+    return 1;
+}
+
+# Fold a Message-Instance header value for insertion.
+sub _fold_mi_header {
+    my $mi_string = shift;
+
+    eval { require Mail::DKIM::TextWrap };
+    if ($EVAL_ERROR) {
+        return $mi_string;
+    }
+    my $output = '';
+    my $tw = Mail::DKIM::TextWrap->new(
+        Margin    => 72,
+        Break     => qr/./,
+        Separator => "\n\t",
+        Swallow   => qr/\s+/,
+        Output    => \$output,
+    );
+    $tw->add("Message-Instance: " . $mi_string);
+    $tw->finish;
+    $output =~ s/^Message-Instance:\s*//;
+    return $output;
 }
 
 # Old name: tools::dkim_sign() which took string and returned string.
@@ -602,8 +790,8 @@ sub check_dkim_sigs {
         : $self->{context};
 
     return
-        unless Sympa::Tools::Data::smart_eq(
-        Conf::get_robot_conf($robot_id || '*', 'dkim_feature'), 'on');
+        unless 'on' eq
+        (Conf::get_robot_conf($robot_id || '*', 'dkim_feature') // '');
 
     my $dkim;
     unless ($dkim = Mail::DKIM::Verifier->new()) {
@@ -876,9 +1064,25 @@ sub set_entity {
     my $new  = $entity->as_string;
 
     if ($orig ne $new) {
+        my $old_body = $self->{_body};
         $self->{_head} = $entity->head;
         $self->{_body} = $entity->body_as_string;
         $self->{_entity_cache} = $entity;    # Also update entity cache.
+
+        # For single-part base64 messages, restore original line
+        # wrapping for unchanged base64 characters.  MIME::Entity
+        # re-encodes at 76-char lines, which changes every line if
+        # the sender used a different length.  The original wrapping
+        # survives only in the old _body string.
+        if (defined $old_body
+            and !$entity->is_multipart
+            and ($entity->head->mime_encoding || '') =~ /^base64$/i) {
+            my $fixed = _restore_b64_wrapping($old_body, $self->{_body});
+            if (defined $fixed) {
+                $self->{_body} = $fixed;
+                delete $self->{_entity_cache};
+            }
+        }
     }
 
     return $entity;
@@ -908,6 +1112,24 @@ sub as_string {
 sub body_as_string {
     my $self = shift;
     return $self->{_body};
+}
+
+# Returns the message as an RFC822 string suitable for Message-Instance
+# calculation.  Excludes Sympa internal pseudo-headers and the synthesized
+# Return-Path, and normalizes line endings to CRLF as required for DKIM
+# body canonicalization.
+sub as_rfc822_string {
+    my $self = shift;
+
+    die 'Bug in logic.  Ask developer' unless $self->{_head};
+
+    my $string = $self->{_head}->as_string . "\n"
+        . (defined $self->{_body} ? $self->{_body} : '');
+
+    # Normalize to CRLF for wire format / DKIM canonicalization.
+    $string =~ s/\r?\n/\r\n/g;
+
+    return $string;
 }
 
 sub header_as_string {
@@ -1095,10 +1317,8 @@ sub smime_decrypt {
         (      $content_type eq 'application/pkcs7-mime'
             or $content_type eq 'application/x-pkcs7-mime'
         )
-        and !Sympa::Tools::Data::smart_eq(
-            $self->{_head}->mime_attr('Content-Type.smime-type'),
-            qr/signed-data/i
-        )
+        and ($self->{_head}->mime_attr('Content-Type.smime-type') // '') !~
+        /signed-data/i
     ) {
         return 0;
     }
@@ -1174,11 +1394,7 @@ sub smime_decrypt {
     # multipart
     $head->delete('Content-Disposition')
         if $self->get_header('Content-Disposition');
-    if (Sympa::Tools::Data::smart_eq(
-            $head->mime_attr('Content-Type'),
-            qr/multipart/i
-        )
-    ) {
+    if (($head->mime_attr('Content-Type') // '') =~ /multipart/i) {
         $head->delete('Content-Transfer-Encoding')
             if $self->get_header('Content-Transfer-Encoding');
     }
@@ -1531,6 +1747,8 @@ sub _personalize_attrs {
         $value =~ s/(?:\r\n|\r|\n)(?=[ \t])//g;    # unfold
         $data->{headers}{$key} = $value;
     }
+    $data->{sender}  = $self->{sender};
+    $data->{gecos}   = $self->{gecos};
     $data->{subject} = $self->{decoded_subject};
 
     return $data;
@@ -1616,14 +1834,34 @@ sub _merge_msg {
             return $entity;
         }
 
+        my $orig_utf8_body = $utf8_body;
         $utf8_body = personalize_text($utf8_body, $list, $rcpt, $data);
         return $entity unless defined $utf8_body;
 
-        ## Data not encodable by original charset will fallback to UTF-8.
+        # If personalization didn't change anything, skip re-encoding
+        # to preserve original wire bytes (important for DKIM/DKIM2
+        # signature stability and avoiding non-deterministic re-encoding
+        # of base64/quoted-printable content).
+        if ($utf8_body eq $orig_utf8_body) {
+            return $entity;
+        }
+
+        # Try encoding in original charset first, to avoid unnecessary
+        # charset/CTE changes that would alter wire bytes.
         my ($newcharset, $newenc);
-        ($body, $newcharset, $newenc) =
-            $in_cset->body_encode(Encode::decode_utf8($utf8_body),
-            Replacement => 'FALLBACK');
+        my $decoded_utf8 = Encode::decode_utf8($utf8_body);
+        eval {
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($decoded_utf8);
+        };
+        if ($EVAL_ERROR or !$newcharset
+            or $newcharset ne $in_cset->as_string) {
+            # Original charset can't represent the new content;
+            # fall back to UTF-8.
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($decoded_utf8,
+                Replacement => 'FALLBACK');
+        }
         unless ($newcharset) {    # bug in MIME::Charset?
             $log->syslog('err', 'Can\'t determine output charset');
             return undef;
@@ -1843,6 +2081,37 @@ sub decorate {
             ) {
                 $entity->sync_headers(Length => 'COMPUTE')
                     if $entity->head->get('Content-Length');
+            } else {
+                # Inline append failed (e.g. charset can't represent
+                # the combined content, or non-decodable encoding).
+                # Fall back to adding footers as separate MIME parts,
+                # converting single-part to multipart/mixed.  This
+                # preserves the original body bytes untouched.
+                $log->syslog('info',
+                    'Inline footer append failed, falling back to MIME parts'
+                );
+                if ($header and -s $header) {
+                    _add_footer_part(
+                        $entity, $header, $list, $rcpt, $data,
+                        mode    => $mode,
+                        type    => 'header',
+                        prepend => 1
+                    );
+                }
+                if ($footer and -s $footer) {
+                    _add_footer_part(
+                        $entity, $footer, $list, $rcpt, $data,
+                        mode => $mode,
+                        type => 'footer'
+                    );
+                }
+                if ($global_footer and -s $global_footer) {
+                    _add_footer_part(
+                        $entity, $global_footer, $list, $rcpt, $data,
+                        mode => $mode,
+                        type => 'global footer'
+                    );
+                }
             }
         }
     } else {
@@ -2005,6 +2274,89 @@ sub _append_parts {
     return undef;
 }
 
+# Restore original base64 line wrapping after MIME::Entity re-encodes.
+#
+# Takes the original raw base64 body (with sender's line wrapping) and
+# the new raw base64 body (re-encoded at standard 76-char lines).
+# Diffs the flat (whitespace-stripped) base64 strings and reconstructs
+# the output preserving original line breaks for unchanged regions.
+#
+# This handles prepended headers, appended footers, and inline
+# substitutions — any change anywhere in the decoded content.
+sub _restore_b64_wrapping {
+    my ($orig_raw, $new_raw) = @_;
+
+    # Strip whitespace to get flat base64 strings.
+    (my $orig_flat = $orig_raw) =~ s/\s+//g;
+    (my $new_flat  = $new_raw)  =~ s/\s+//g;
+
+    return undef if $orig_flat eq $new_flat;    # Nothing to do.
+
+    # Detect original line length from the first complete line.
+    my $orig_line_len = 76;
+    if ($orig_raw =~ /^([^\r\n]+)\r?\n/) {
+        $orig_line_len = length($1);
+    }
+
+    # Build a map from flat-position to raw-position in the original,
+    # so we can emit original bytes (including line breaks) for
+    # unchanged regions.
+    my @orig_raw_chars = split //, $orig_raw;
+    my @flat_to_raw;    # flat_pos -> raw_pos
+    for my $i (0 .. $#orig_raw_chars) {
+        next if $orig_raw_chars[$i] =~ /\s/;
+        push @flat_to_raw, $i;
+    }
+
+    # Diff the flat base64 strings character-by-character using
+    # Algorithm::Diff to find matching blocks.
+    my @orig_chars = split //, $orig_flat;
+    my @new_chars  = split //, $new_flat;
+
+    require Algorithm::Diff;
+    my $diff = Algorithm::Diff->new(\@orig_chars, \@new_chars);
+    $diff->Base(0);
+
+    my $result = '';
+    my $col = 0;    # Current column for wrapping new content.
+
+    while ($diff->Next()) {
+        if ($diff->Same()) {
+            # Unchanged region: emit from original raw, preserving
+            # line breaks.
+            my $min1 = $diff->Min(1);
+            my $max1 = $diff->Max(1);
+            # Map flat positions back to raw positions.
+            my $raw_start = $flat_to_raw[$min1];
+            my $raw_end   = $flat_to_raw[$max1];
+            my $chunk = substr($orig_raw,
+                $raw_start, $raw_end - $raw_start + 1);
+            $result .= $chunk;
+            # Track column position after emitting.
+            if ($chunk =~ /([^\r\n]*)\z/) {
+                $col = length($1);
+            }
+        } else {
+            # Changed region: emit new base64 chars with consistent
+            # line wrapping.
+            my @items = $diff->Items(2);
+            for my $ch (@items) {
+                if ($col >= $orig_line_len) {
+                    $result .= "\n";
+                    $col = 0;
+                }
+                $result .= $ch;
+                $col++;
+            }
+        }
+    }
+
+    # Ensure trailing newline.
+    $result .= "\n" unless $result =~ /\n\z/;
+
+    return $result;
+}
+
 sub _add_footer_part {
     my $entity  = shift;
     my $footer  = shift;
@@ -2099,6 +2451,71 @@ sub _append_footer_header_to_part {
     }
     $in_cset->encoder($in_cset);    # no charset conversion
 
+    my $cte = uc($entity->head->mime_attr('Content-Transfer-Encoding') || '');
+
+    # For quoted-printable text/plain, concatenate at the raw QP-encoded
+    # level.  Only the header/footer text is freshly QP-encoded; the
+    # original body lines remain byte-identical.  This preserves the
+    # original sender's QP choices (e.g. unnecessarily-quoted characters,
+    # non-standard soft line break positions) and produces compact
+    # Message-Instance body Recipes (a single copy range for the
+    # original body).
+    if ($eff_type eq 'text/plain' and $cte eq 'QUOTED-PRINTABLE') {
+        my $raw_qp = $entity->body_as_string;
+
+        # Encode header/footer as QP in the message's charset.
+        my @parts;
+        for my $text ($header_msg, $footer_msg, $global_footer_msg) {
+            next unless defined $text and length $text;
+            # Encode text to message charset bytes, then QP-encode.
+            my $bytes = eval {
+                Encode::encode($in_cset->as_string,
+                    Encode::decode_utf8($text, 1));
+            };
+            if ($EVAL_ERROR) {
+                # Charset can't represent the footer text — fall through
+                # to the standard decode-concatenate-reencode path below.
+                undef @parts;
+                last;
+            }
+            push @parts, MIME::QuotedPrint::encode_qp($bytes);
+        }
+
+        if (@parts or (!length($header_msg // '')
+                    and !length($footer_msg // '')
+                    and !length($global_footer_msg // ''))) {
+            # Build the concatenated QP body.
+            my $qp_header = shift @parts // '';
+            my $qp_footer = shift @parts // '';
+            my $qp_global_footer = shift @parts // '';
+
+            # Ensure newlines between parts.
+            if (length $qp_header and $qp_header !~ /\n\z/) {
+                $qp_header .= "\n";
+            }
+            if (length $qp_footer and $raw_qp !~ /\n\z/) {
+                $raw_qp .= "\n";
+            }
+            if (length $qp_global_footer) {
+                my $prev = length $qp_footer ? $qp_footer : $raw_qp;
+                if ($prev !~ /\n\z/) {
+                    $qp_footer .= "\n" if length $qp_footer;
+                }
+            }
+            if (length $qp_footer and $qp_footer !~ /\n\z/) {
+                $qp_footer .= "\n";
+            }
+            if (length $qp_global_footer
+                and $qp_global_footer !~ /\n\z/) {
+                $qp_global_footer .= "\n";
+            }
+
+            return $qp_header . $raw_qp . $qp_footer . $qp_global_footer;
+        }
+        # If QP encoding of footer failed (charset mismatch), fall
+        # through to the standard path below.
+    }
+
     # Decode body to Unicode, since Sympa::Tools::Text::encode_html() and
     # newline normalization will break texts with several character sets
     # (UTF-16/32, ISO-2022-JP, ...).
@@ -2131,8 +2548,7 @@ sub _append_footer_header_to_part {
         if (length $global_footer_msg) {
             $global_footer_msg .= "\n" unless $global_footer_msg =~ /\n\z/;
         }
-        if (uc($entity->head->mime_attr('Content-Transfer-Encoding') || '')
-            eq 'BASE64') {
+        if ($cte eq 'BASE64') {
             $header_msg =~ s/\r\n|\r|\n/\r\n/g;
             $body =~ s/(\r\n|\r|\n)\z/\r\n/;    # only at end
             $footer_msg =~ s/\r\n|\r|\n/\r\n/g;
@@ -2141,10 +2557,20 @@ sub _append_footer_header_to_part {
 
         $new_body = $header_msg . $body . $footer_msg . $global_footer_msg;
 
-        ## Data not encodable by original charset will fallback to UTF-8.
+        # Try encoding in original charset first, to avoid unnecessary
+        # charset/CTE changes that would alter wire bytes.
         my ($newcharset, $newenc);
-        ($body, $newcharset, $newenc) =
-            $in_cset->body_encode($new_body, Replacement => 'FALLBACK');
+        eval {
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($new_body);
+        };
+        if ($EVAL_ERROR or !$newcharset
+            or $newcharset ne $in_cset->as_string) {
+            # Original charset can't represent the new content;
+            # fall back to UTF-8.
+            ($body, $newcharset, $newenc) =
+                $in_cset->body_encode($new_body, Replacement => 'FALLBACK');
+        }
         unless ($newcharset) {                  # bug in MIME::Charset?
             $log->syslog('err', 'Can\'t determine output charset');
             return undef;
@@ -2156,16 +2582,19 @@ sub _append_footer_header_to_part {
         $log->syslog('debug3', "Treating text/html part");
 
         # Escape special characters.
-        $header_msg = Sympa::Tools::Text::encode_html($header_msg);
-        $header_msg =~ s/(\r\n|\r|\n)$//;       # strip the last newline.
-        $header_msg =~ s,(\r\n|\r|\n),<br/>,g;
-        $footer_msg = Sympa::Tools::Text::encode_html($footer_msg);
-        $footer_msg =~ s/(\r\n|\r|\n)$//;       # strip the last newline.
-        $footer_msg =~ s,(\r\n|\r|\n),<br/>,g;
-        $global_footer_msg =
-            Sympa::Tools::Text::encode_html($global_footer_msg);
+        #---acb: and for all three header/footer parts, wrap all URIs
+        # in HTML tags, and keep newlines for readability and for
+        # outlook.com parsing:
+        my $finder = Sympa::HTML::URIFind->new;
+        $finder->find(\$header_msg);
+        $header_msg =~ s/(\r\n|\r|\n)$//;           # strip the last newline.
+        $header_msg =~ s,(\r\n|\r|\n),<br/>$1,g;    # keep newlines
+        $finder->find(\$footer_msg);
+        $footer_msg =~ s/(\r\n|\r|\n)$//;           # strip the last newline.
+        $footer_msg =~ s,(\r\n|\r|\n),<br/>$1,g;    # keep newlines
+        $finder->find(\$global_footer_msg);
         $global_footer_msg =~ s/(\r\n|\r|\n)$//;    # strip the last newline.
-        $global_footer_msg =~ s,(\r\n|\r|\n),<br/>,g;
+        $global_footer_msg =~ s,(\r\n|\r|\n),<br/>$1,g;    # keep newlines
 
         $new_body = $body;
         if (length $header_msg) {
@@ -2282,10 +2711,8 @@ sub _urlize_one_part {
 
     return undef unless ($parent_eff_type eq 'multipart/mixed');
 
-    my $expl     = $list->{'dir'} . '/urlized';
-    my $listname = $list->{'name'};
-    my $head     = $entity->head;
-    my $encoding = $head->mime_encoding;
+    my $expl = $list->{'dir'} . '/urlized';
+    my $head = $entity->head;
 
     # name of the linked file
     my $filename;
@@ -2328,10 +2755,8 @@ sub _urlize_one_part {
     if ($entity->bodyhandle) {
         my $ct = $entity->effective_type || 'text/plain';
         printf $fh "Content-Type: %s", $ct;
-        printf $fh "; Charset=%s",
-            $head->mime_attr('Content-Type.Charset')
-            if Sympa::Tools::Data::smart_eq(
-            $head->mime_attr('Content-Type.Charset'), qr/\S/);
+        printf $fh "; Charset=%s", $head->mime_attr('Content-Type.Charset')
+            if ($head->mime_attr('Content-Type.Charset') // '') =~ /\S/;
         print $fh "\n\n";
         print $fh $entity->bodyhandle->as_string;
     } else {
@@ -2345,7 +2770,7 @@ sub _urlize_one_part {
     my $size = -s $file;
 
     ## Only URLize files with a moderate size
-    if ($size < $Conf::Conf{'urlize_min_size'}) {
+    if ($size < Conf::get_robot_conf($list->{'domain'}, 'urlize_min_size')) {
         unlink $file;
         return undef;
     }
