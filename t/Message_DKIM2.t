@@ -618,9 +618,9 @@ subtest 'QP body preserved during footer append' => sub {
 };
 
 # ===================================================================
-# 17. QP decoration produces compact MI recipes
+# 17. QP decoration produces compact MI Recipes
 # ===================================================================
-subtest 'QP decoration produces compact MI recipe' => sub {
+subtest 'QP decoration produces compact MI Recipe' => sub {
     my $qp_body = "Hello world.\nLine two.\nLine three.\n";
     my $msg = Sympa::Message->new(
         build_message(
@@ -710,14 +710,14 @@ subtest 'base64 line wrapping preserved' => sub {
     is length($lines_after[0]), 20,
         'first base64 line keeps original 20-char width';
 
-    # MI should produce compact recipe.
+    # MI should produce compact Recipe.
     $msg->add_message_instance_egress($mi_original);
 
     my $rfc822 = $msg->as_rfc822_string;
     my ($version) = Mail::DKIM2::MessageInstance->verify($rfc822);
     is $version, 2, 'v=2 verifies on base64 message with preserved wrapping';
 
-    # Check recipe compactness — should have copy ranges, not all literals.
+    # Check Recipe compactness — should have copy ranges, not all literals.
     my $em = Email::MIME->new($rfc822);
     my @mi = $em->header_raw('Message-Instance');
     my $mi_v2;
@@ -730,7 +730,7 @@ subtest 'base64 line wrapping preserved' => sub {
     if ($rb) {
         my @ranges = grep { ref $_ eq 'ARRAY' } @$rb;
         ok scalar(@ranges) >= 1,
-            'body recipe has copy ranges (not all literals)';
+            'body Recipe has copy ranges (not all literals)';
     }
 };
 

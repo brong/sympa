@@ -6,10 +6,10 @@ effect on generated emails.
 
 ## Overview
 
-DKIM2 (draft-clayton-dkim2-spec-08) provides verifiable chain of custody
+DKIM2 (draft-clayton-dkim2-spec-08) provides verifiable Chain of Custody
 for email messages.  Each intermediary that modifies a message documents
 its changes by adding a Message-Instance header containing cryptographic
-hashes and diff recipes.  Downstream verifiers can use these to
+hashes and diff Recipes.  Downstream verifiers can use these to
 reconstruct earlier versions of the message and verify each hop's
 hashes.
 
@@ -19,9 +19,9 @@ and re-encoding bodies.  These changes must be captured in
 Message-Instance headers so downstream recipients can verify the
 original message.
 
-## How Message-Instance recipes work
+## How Message-Instance Recipes work
 
-The MI v=2 header contains recipes that allow reconstructing the
+The MI v=2 header contains Recipes that allow reconstructing the
 **previous** (original) message from the **current** (modified) message.
 Recipe entries are:
 
@@ -36,11 +36,11 @@ This means:
 | Footer appended (lines match) | Single `[1, N]` copy range — footer lines are simply unreferenced and dropped during undo |
 | Footer appended, last base64 line changed due to padding shift | `[1, N-1]` copy range + 1 literal for the original last line |
 | Inline substitution (personalization) | Copy ranges around the edit + literals for the original text at the edit point |
-| Full re-encoding (no lines match) | All literals — entire original body stored in recipe |
+| Full re-encoding (no lines match) | All literals — entire original body stored in Recipe |
 
 The goal of the encoding-preservation commits below is to keep
 modifications in the "lines match" category wherever possible, so
-recipes stay compact (a single copy range for the unchanged body).
+Recipes stay compact (a single copy range for the unchanged body).
 
 ## Changes
 
@@ -194,7 +194,7 @@ S/MIME) but before DKIM signing:
 - **Relayed messages** (have `mi_original`): Compares header and body
   hashes of the current message against the original.  If unchanged,
   skips MI v=2 entirely.  If changed, calculates MI v=2 with diff
-  recipes.
+  Recipes.
 - **Internally generated messages** (notifications, digests, etc.):
   Adds MI v=1 as originator since Sympa authored the message.
 
@@ -223,9 +223,9 @@ QP-encoded; the original body lines remain byte-identical.
 **Why:** The standard decode-concatenate-reencode path destroys the
 sender's QP choices (unnecessarily-quoted characters like `=48` for
 `H`, non-standard soft line break positions).  Re-encoding changes
-every line, producing a body recipe that stores the entire original
+every line, producing a body Recipe that stores the entire original
 body as literals.  Raw QP concatenation preserves the sender's
-encoding, so the MI body recipe is a single `[1, N]` copy range.
+encoding, so the MI body Recipe is a single `[1, N]` copy range.
 
 Falls back to the standard path if the footer text cannot be encoded
 in the message's charset.
@@ -244,9 +244,9 @@ line wrapping by diffing the flat (whitespace-stripped) base64 strings
 using Algorithm::Diff and reconstructing the output with original
 line breaks for unchanged character blocks.
 
-**Why:** Without this, the MI body recipe must store the entire
+**Why:** Without this, the MI body Recipe must store the entire
 original body as literals (every line changed).  With restored
-wrapping, the recipe is a compact copy range for unchanged lines
+wrapping, the Recipe is a compact copy range for unchanged lines
 plus a single literal for the last changed line (where base64
 padding shifted due to the appended content).
 
@@ -259,7 +259,7 @@ preserved.
 
 | Message path | MI treatment |
 |---|---|
-| List distribution (ToList) | v=1 at ingress, v=2 at egress with recipes |
+| List distribution (ToList) | v=1 at ingress, v=2 at egress with Recipes |
 | Forward to -owner/-editor (DoForward) | v=1 at ingress (inherits ProcessIncoming), v=2 at egress |
 | Resent from archive (ResendArchive) | v=1 from archive or added fresh, v=2 at egress |
 | Template notifications (send_file, send_dsn) | v=1 at egress (Sympa as originator) |
@@ -272,10 +272,10 @@ preserved.
 
 MI headers add approximately 150-300 bytes per message when nothing
 changed (v=1 only, or v=2 with hashes but the skip-if-unchanged
-optimisation fires), or 300-600 bytes when body/header recipes are
+optimisation fires), or 300-600 bytes when body/header Recipes are
 present.  Recipes are compact when encoding is preserved:
 
-- Footer append with lines matching: recipe is a single `[1, N]`
+- Footer append with lines matching: Recipe is a single `[1, N]`
   copy range (the footer is simply not referenced)
 - Footer append with base64 padding shift: `[1, N-1]` range + 1
   literal for the changed last line
@@ -304,11 +304,11 @@ the hash comparison.
 |-----------|------|-----------|
 | SHA-256 hashes at ingress | Proportional to message size | Once per message |
 | SHA-256 hash comparison at egress | Proportional to message size | Once per recipient/batch |
-| Full recipe computation (if changed) | O(n+d) typical | Once per recipient/batch |
+| Full Recipe computation (if changed) | O(n+d) typical | Once per recipient/batch |
 | `Email::MIME->new()` parsing | Proportional to message size | 2x per recipient/batch |
 
 The skip-if-unchanged optimisation avoids the expensive Algorithm::Diff
-and recipe computation for messages that pass through without body or
+and Recipe computation for messages that pass through without body or
 header modifications.
 
 ### Disk

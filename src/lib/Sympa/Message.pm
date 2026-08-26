@@ -567,7 +567,7 @@ sub add_message_instance_egress {
     my $msg_current = $self->as_rfc822_string;
 
     # Quick check: if header and body hashes are unchanged, skip MI v=2
-    # entirely.  This avoids expensive recipe computation for messages
+    # entirely.  This avoids expensive Recipe computation for messages
     # that pass through without modification (e.g., no footer configured,
     # no personalization).
     my $em_current = Email::MIME->new($msg_current);
@@ -2458,7 +2458,7 @@ sub _append_footer_header_to_part {
     # original body lines remain byte-identical.  This preserves the
     # original sender's QP choices (e.g. unnecessarily-quoted characters,
     # non-standard soft line break positions) and produces compact
-    # Message-Instance body recipes (a single copy range for the
+    # Message-Instance body Recipes (a single copy range for the
     # original body).
     if ($eff_type eq 'text/plain' and $cte eq 'QUOTED-PRINTABLE') {
         my $raw_qp = $entity->body_as_string;
