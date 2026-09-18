@@ -463,7 +463,7 @@ BEGIN {
 # DKIM2 implementation metadata — update DKIM2_DATE on each change.
 use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-06';
 use constant DKIM2_REPO     => 'github.com/brong/sympa';
-use constant DKIM2_DATE     => '2026-08-28';
+use constant DKIM2_DATE     => '2026-09-18';
 use constant DKIM2_SOFTWARE => 'sympa';
 
 sub _dkim2_info {
@@ -535,9 +535,11 @@ sub add_message_instance_ingress {
 
     my $mi_value = _fold_mi_header($mi->as_string);
     my ($hc, $hn) = _header_list_for_hash($msg_string);
+    # Message-Instance first, then the X-DKIM2-Info describing it, so the
+    # info field ends up directly above the field it records.
+    $self->prepend_header('Message-Instance', $mi_value);
     $self->prepend_header('X-DKIM2-Info',
         _dkim2_info('mi-m1', hc => $hc, hn => $hn));
-    $self->prepend_header('Message-Instance', $mi_value);
 
     # Store the original message (with MI m=1 now added) for later
     # diffing at egress.
@@ -608,9 +610,11 @@ sub add_message_instance_egress {
     my $mi_value = _fold_mi_header($mi->as_string);
     my $version = $mi->get_tag('m');
     my ($hc, $hn) = _header_list_for_hash($msg_current);
+    # Message-Instance first, then the X-DKIM2-Info describing it (see
+    # add_message_instance_ingress).
+    $self->prepend_header('Message-Instance', $mi_value);
     $self->prepend_header('X-DKIM2-Info',
         _dkim2_info("mi-m$version", hc => $hc, hn => $hn));
-    $self->prepend_header('Message-Instance', $mi_value);
 
     $log->syslog('debug2', 'Added Message-Instance m=%s', $version);
     return 1;
