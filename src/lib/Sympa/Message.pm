@@ -463,31 +463,29 @@ BEGIN {
 # DKIM2 implementation metadata — update DKIM2_DATE on each change.
 use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-06';
 use constant DKIM2_REPO     => 'github.com/brong/sympa';
-use constant DKIM2_DATE     => '2026-09-18';
+use constant DKIM2_DATE     => '2026-09-30';
 use constant DKIM2_SOFTWARE => 'sympa';
 
+# X-DKIM2-Info value per draft-gondwana-dkim2-debug-header-01: a tag-list in
+# the DKIM2 syntax, every tag (the last included) followed by ";". A ";" has
+# no escape and ends a tag, so one inside a value becomes ",".
 sub _dkim2_info {
     my ($action, %extra) = @_;
-    my $val = "draft=" . DKIM2_DRAFT
-            . "; repo=" . DKIM2_REPO
-            . "; date=" . DKIM2_DATE
-            . "; sw=" . DKIM2_SOFTWARE
-            . "; action=$action";
-    for my $key (sort keys %extra) {
-        next unless defined $extra{$key};
-        $val .= "; $key=$extra{$key}";
-    }
-    # Fold at tag boundaries.  Previously only the first three tags were folded
-    # and everything from action= onwards ran into a single line, which the hn=
-    # list of hashed header names pushes well past the RFC 5322 recommendation
-    # of 78 -- a list message reaches 200+ characters.  X-DKIM2-Info is excluded
-    # from the header hash by the x-* rule, so folding it cannot affect a
-    # signature.
+    my @tags = ("draft=" . DKIM2_DRAFT, "repo=" . DKIM2_REPO,
+                "date=" . DKIM2_DATE, "sw=" . DKIM2_SOFTWARE, "action=$action");
+    push @tags, "$_=$extra{$_}" for grep { defined $extra{$_} } sort keys %extra;
+    my $val = join ' ', map { (my $t = $_) =~ s/;/,/g; "$t;" } @tags;
+    # Fold only after a ";" or a "," (Section 5): never inside a token, so the
+    # hn= list of hashed header names -- which pushes a list message past the
+    # RFC 5322 recommendation of 78 to 200+ characters -- breaks between
+    # names.  X-DKIM2-Info is excluded from the header hash by the x-* rule,
+    # so folding it cannot affect a signature.
     eval { require Mail::DKIM2::Common };
     return $val if $EVAL_ERROR;
     # fold_header() budgets for the field name, so fold with it attached and
     # strip it back off -- callers insert the value alone.
-    my $folded = Mail::DKIM2::Common::fold_header("X-DKIM2-Info: $val");
+    my $folded = Mail::DKIM2::Common::fold_header("X-DKIM2-Info: $val", undef,
+        delimiters_only => 1);
     $folded =~ s/^X-DKIM2-Info:\s*//;
     return $folded;
 }
@@ -539,7 +537,7 @@ sub add_message_instance_ingress {
     # info field ends up directly above the field it records.
     $self->prepend_header('Message-Instance', $mi_value);
     $self->prepend_header('X-DKIM2-Info',
-        _dkim2_info('mi-m1', hc => $hc, hn => $hn));
+        _dkim2_info('mi-m=1', hc => $hc, hn => $hn));
 
     # Store the original message (with MI m=1 now added) for later
     # diffing at egress.
@@ -614,7 +612,7 @@ sub add_message_instance_egress {
     # add_message_instance_ingress).
     $self->prepend_header('Message-Instance', $mi_value);
     $self->prepend_header('X-DKIM2-Info',
-        _dkim2_info("mi-m$version", hc => $hc, hn => $hn));
+        _dkim2_info("mi-m=$version", hc => $hc, hn => $hn));
 
     $log->syslog('debug2', 'Added Message-Instance m=%s', $version);
     return 1;
