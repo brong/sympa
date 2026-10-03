@@ -152,7 +152,7 @@ sub is_autoinc {
         return undef;
     }
     my $field = $sth->fetchrow();
-    return ($field eq $seqname);
+    return ($field // '') eq $seqname;
 }
 
 sub set_autoinc {
@@ -622,6 +622,40 @@ sub set_index {
     $log->syslog('info', 'Table %s, index %s set using fields %s',
         $param->{'table'}, $param->{'index_name'}, $fields);
     return $report;
+}
+
+sub get_views {
+    my $self = shift;
+
+    if (my $sth = $self->do_query(q{SELECT '' FROM dual})) {
+        $sth->finish;
+        return [qw(dual)];
+    }
+    return [];
+}
+
+use constant _views => {dual => q{SELECT 'X'::varchar(1) AS dummy}};
+
+sub add_view {
+    my $self = shift;
+    my $param = shift || {};
+
+    my $view = $param->{view};
+    return undef unless $view;
+
+    unless (
+        $self->__dbh->do(
+            sprintf q{CREATE VIEW %s AS %s;}, $view,
+            $self->_views->{$view}
+        )
+    ) {
+        $log->syslog(
+            'err', 'Unable to add view "%s": %s',
+            $view, $self->__dbh->errstr
+        );
+        return undef;
+    }
+    return sprintf 'View %s', $view;
 }
 
 sub translate_type {
