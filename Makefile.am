@@ -95,6 +95,7 @@ nobase_modules_DATA = \
 EXTRA_DIST = \
 	AUTHORS.md \
 	CONTRIBUTING.md \
+	DKIM2-MESSAGE-INSTANCE.md \
 	INSTALL.md \
 	NEWS.md \
 	ONEWS \

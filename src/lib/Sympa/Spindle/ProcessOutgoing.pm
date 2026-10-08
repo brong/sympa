@@ -33,6 +33,7 @@ use English qw(-no_match_vars);
 use Sympa;
 use Conf;
 use Sympa::DatabaseManager;
+use Sympa::DKIM2;
 use Sympa::List;
 use Sympa::Log;
 use Sympa::Mailer;
@@ -175,6 +176,7 @@ sub __twist_one {
     my %arc     = %{shift || {}};
     my %dkim    = %{shift || {}};
     my $rm_sig  = shift;
+    my $dkim2   = shift;
 
     my $that = $message->{context};
 
@@ -202,6 +204,7 @@ sub __twist_one {
         @{$that->{'admin'}{'rfc2369_header_fields'}}) {
         $that->add_list_header($message, 'unsubscribe', oneclick => $rcpt);
     }
+    my $personalize_all = ($personalize and $personalize ne 'footer');
     if ($personalize and $personalize ne 'footer') {
         unless ($message->personalize($that, $rcpt)) {
             $log->syslog('err', 'Erreur d appel personalize()');
@@ -253,6 +256,20 @@ sub __twist_one {
         $message->delete_header('Domainkey-Signature');
     }
 
+    # Determine envelope sender and envelope ID.  With DKIM2 this must
+    # come before egress_add (MDN tracking adds Disposition-Notification-To);
+    # otherwise it stays where stock Sympa has it, after DKIM/ARC.
+    my $envid;
+    $envid = _set_envelope_and_tracking($message, $that, $rcpt, $tracking)
+        if $dkim2;
+
+    # DKIM2: describe this copy's changes, after every transformation and
+    # before DKIM/ARC signing.  Nothing that changes a hashed header field
+    # may come after this.
+    Sympa::DKIM2::egress_add($message, $dkim2,
+        body_rewritten =>
+            (($personalize_all or $smime_sign or $smime_encrypt) ? 1 : 0));
+
     if ($message->{shelved}{dkim_sign} or %arc) {
         # apply DKIM signature AFTER any other message transformation.
         # Note that when ARC seal was added, DKIM signature is forced.
@@ -265,7 +282,28 @@ sub __twist_one {
         $message->delete_header('Authentication-Results');
     }
 
-    # Determine envelope sender and envelope ID.
+    $envid = _set_envelope_and_tracking($message, $that, $rcpt, $tracking)
+        unless $dkim2;
+
+    unless (
+        defined $mailer->store(
+            $message, $rcpt,
+            envid => $envid,
+            tag   => $message->{serial}
+        )
+    ) {
+        $log->syslog('err', 'Failed to store message %s into mailer',
+            $message);
+        # Quarantine packet into bad spool.
+        return undef;
+    }
+}
+
+# Sets the envelope sender (and, for MDN tracking,
+# Disposition-Notification-To) of one copy; returns the envelope ID.
+sub _set_envelope_and_tracking {
+    my ($message, $that, $rcpt, $tracking) = @_;
+
     my $envid = undef;
     if ($tracking) {
         # If tracking (including VERP) is enabled, override envelope sender.
@@ -293,19 +331,7 @@ sub __twist_one {
             ? Sympa::get_address($that, 'return_path')
             : Sympa::get_address($that, 'owner');
     }
-
-    unless (
-        defined $mailer->store(
-            $message, $rcpt,
-            envid => $envid,
-            tag   => $message->{serial}
-        )
-    ) {
-        $log->syslog('err', 'Failed to store message %s into mailer',
-            $message);
-        # Quarantine packet into bad spool.
-        return undef;
-    }
+    return $envid;
 }
 
 sub _twist {
@@ -381,18 +407,21 @@ sub _twist {
         if %arc
         or $message->{shelved}{dkim_sign};
 
+    # DKIM2: checked once per packet, before any per-recipient change.
+    my $dkim2 = Sympa::DKIM2::egress_context($message);
+
     if (   $message->{shelved}{merge}
         or $message->{shelved}{smime_encrypt}
         or $message->{shelved}{tracking}) {
         # message needs personalization
         foreach my $rcpt (@rcpts) {
             __twist_one($message, $rcpt, {%arc}, {%dkim},
-                $arc_enabled || $dkim_enabled);
+                $arc_enabled || $dkim_enabled, $dkim2);
         }
     } else {
         # message doesn't need personalization, so can be sent by packet.
         __twist_one($message, [@rcpts], {%arc}, {%dkim},
-            $arc_enabled || $dkim_enabled);
+            $arc_enabled || $dkim_enabled, $dkim2);
     }
 
     1;
