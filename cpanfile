@@ -206,6 +206,10 @@ feature 'cas', 'CAS Single Sign-On client libraries. Required if you configure S
     requires 'AuthCAS', '>= 1.4';
 };
 
+feature 'dkim2', 'DKIM2 Message-Instance support: required if you set the dkim2_message_instance list parameter to on.' => sub {
+    requires 'Mail::DKIM2', '>= 0.15';
+};
+
 feature 'Clone', 'Used to make copy of internal data structures.' => sub {
     requires 'Clone', '>= 0.31';
 };
