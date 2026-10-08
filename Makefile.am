@@ -27,6 +27,7 @@ check_SCRIPTS = \
 	t/01_Conf.t \
 	t/CLI_getoptions.t \
 	t/Config_XML.t \
+	t/DKIM2.t \
 	t/DataSource_LDAP2.t \
 	t/Database_LDAP.t \
 	t/Database_SQLite.t \
