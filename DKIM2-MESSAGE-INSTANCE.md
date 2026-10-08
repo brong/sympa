@@ -169,7 +169,8 @@ and ARC signing.
    changed at all (no header change, body Recipe "none"), no instance is
    added.
 5. Add it as the next `m=` (one more than the highest present) at the top of
-   the header, folded with Mail::DKIM2's folder.
+   the header, folded with Mail::DKIM2's folder, with an `X-DKIM2-Info`
+   field directly above it (below).
 
 The whole step runs in an `eval`. On any failure it logs and the copy goes
 out without the new instance: DKIM2 never blocks or loses list mail.
@@ -197,6 +198,19 @@ An outbound `dkim2-milter` refuses to sign a message whose top instance
 has a null body Recipe unless it is started with `--allow-null-body-recipe`.
 A list host running Sympa needs that option on its outbound signer.
 
+### X-DKIM2-Info
+
+Every `Message-Instance` Sympa adds (`m=1` at ingress, `m=N` at egress) has
+an `X-DKIM2-Info` field directly above it, in the
+draft-gondwana-dkim2-debug-header-01 form: a tag-list in the DKIM2 syntax,
+every tag followed by `;`, naming the draft implemented, the repository and
+date of the implementation, the software, the action (`mi-m=<N>`), and the
+count (`hc=`) and ordered names (`hn=`) of the header fields that went into
+the hash. It exists so an interop problem can be diagnosed from the message
+alone. It is folded only after a `;` or `,`, and as an `X-` field it is
+outside the header hash. `DKIM2_DRAFT` and `DKIM2_DATE` in `Sympa::DKIM2`
+name the draft and the date of the last change to what Sympa emits.
+
 ### Ordering
 
 Nothing that changes a hashed header field may run after `egress_add`.
@@ -215,7 +229,7 @@ comes before the DKIM2 step.
 | txt, html, urlize, notice reception modes | null body Recipe, small header Recipe |
 | Full-body personalisation (`personalization.mail_apply_on all`) | null body Recipe per recipient |
 | Footer-only personalisation (`personalization.mail_apply_on footer`) | wrap; the copies differ only in the trailing part |
-| Anonymous list | no pseudo-header at ingress, stock decoration; egress removes `DKIM2-Signature` and `Message-Instance`, and the outbound signer starts a new chain with `m=1` |
+| Anonymous list | no pseudo-header at ingress, stock decoration; egress removes `DKIM2-Signature`, `Message-Instance` and `X-DKIM2-Info`, and the outbound signer starts a new chain with `m=1` |
 | Resend from archive | on a DKIM2 list, the chain is removed as for anonymous lists |
 | Digests, notifications, auto-replies, direct sends, bounces | no saved header block; Sympa adds nothing (the outbound signer adds `m=1`) |
 | Messages embedded in a digest | content, left alone |

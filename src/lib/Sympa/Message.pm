@@ -4498,8 +4498,8 @@ Adding DKIM signature.
 
 =item dkim2_strip =E<gt> 1
 
-Removing the DKIM2 chain (C<DKIM2-Signature:>, C<Message-Instance:>) at
-egress.  Set when a message is resent from the
+Removing the DKIM2 chain (C<DKIM2-Signature:>, C<Message-Instance:>,
+C<X-DKIM2-Info:>) at egress.  Set when a message is resent from the
 archive on a list with C<dkim2_message_instance> on.  See L<Sympa::DKIM2>.
 
 =item dmarc_protect =E<gt> 1

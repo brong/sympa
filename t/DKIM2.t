@@ -197,7 +197,7 @@ subtest 'wrap: header kept intact, Content-* moved to the original part' => sub 
     is $b->get_header('X-Other'), 'kept', 'other fields kept';
     is $h->count('Message-Instance'), 1, 'Message-Instance kept';
     my @tags = grep { !/^(content-|mime-version)/i } $h->as_string =~ /^([^\s:]+):/mg;
-    is_deeply [@tags], [qw(Message-Instance From To Subject X-Other)], 'order of other fields kept';
+    is_deeply [@tags], [qw(X-DKIM2-Info Message-Instance From To Subject X-Other)], 'order of other fields kept';
     like $b->{_body}, qr/\n--\S+\nContent-Type:\ text\/plain;\n\tcharset="iso-8859-1";\n\tformat=flowed\n
         Content-Transfer-Encoding:\ quoted-printable\nContent-Language:\ fr\n\ncaf=E9\n\n--/x,
         'original part: fields in order, then the body verbatim';
@@ -585,20 +585,20 @@ subtest 'ProcessOutgoing: no DKIM2 context -> stock order' => sub {
 };
 
 subtest 'anonymous list strips the chain, original From nowhere' => sub {
-    my $signed_in = "DKIM2-Signature: i=1; d=example.org; fake\nMessage-Instance: m=1; h=sha256:x:y;\n"
+    my $signed_in = "DKIM2-Signature: i=1; d=example.org; fake\nMessage-Instance: m=1; h=sha256:x:y;\nX-DKIM2-Info: action=mi-m=1;\n"
                   . "From: Whistle Blower <whistle\@corp.example>\nOrganization: Corp Inc\nSubject: s\n\nbody\n";
     my $w = through($signed_in, sub {
         $_[0]->replace_header('From', 'anon@mail.example.org');
         $_[0]->delete_header('Organization');
     }, anonymous_sender => 'anon@mail.example.org');
-    unlike $w, qr/^(DKIM2-Signature|Message-Instance):/mi, 'chain stripped';
+    unlike $w, qr/^(DKIM2-Signature|Message-Instance|X-DKIM2-Info):/mi, 'chain stripped';
     unlike $w, qr/whistle|Corp Inc/i, 'original sender nowhere';
 };
 
 subtest 'resend from archive strips the chain' => sub {
     my $signed = "DKIM2-Signature: i=1; d=example.org; fake\n" . $plain;
     my $w = through($signed, undef, shelved => ['dkim2_strip']);
-    unlike $w, qr/^(DKIM2-Signature|Message-Instance):/mi,
+    unlike $w, qr/^(DKIM2-Signature|Message-Instance|X-DKIM2-Info):/mi,
         'stripped';
     my $m = Sympa::Message->new($plain, context => list());
     $m->{shelved}{dkim2_strip} = 1;
@@ -706,6 +706,17 @@ subtest 'custom archiver file has no DKIM2 pseudo-header' => sub {
     unlike $s, qr/X-Sympa-DKIM2-Headers/, 'not in archive copy';
     ok defined $m->{dkim2_headers}, 'delivered message keeps its saved headers';
     like $m->to_string, qr/^X-Sympa-DKIM2-Headers:/m, 'still spooled';
+};
+
+subtest 'X-DKIM2-Info above each instance Sympa adds' => sub {
+    my $w = through($plain, sub { $_[0]->replace_header('Subject', '[test] hi') });
+    like $w, qr/\AX-DKIM2-Info: (?:[^\r\n]|\r\n[ \t])*?action=mi-m=2;.*?\r\nMessage-Instance: m=2;/s, 'above m=2';
+    like $w, qr/X-DKIM2-Info: (?:[^\r\n]|\r\n[ \t])*?action=mi-m=1;.*?\r\nMessage-Instance: m=1;/s, 'above m=1';
+    my ($info) = $w =~ /\AX-DKIM2-Info: (.*?)\r\n(?![ \t])/s;
+    $info =~ s/\r\n[ \t]+/ /g;
+    like $info, qr/\A(?:[a-z0-9-]+=[^;]*; ?)+\z/, 'tag-list, every tag ends in ;';
+    like $info, qr/draft=ietf-dkim-dkim2-spec-06;/, 'draft';
+    like $info, qr/hc=\d+; hn=[a-z0-9,-]+;/, 'hashed header count and names';
 };
 
 # ---- Regression cases from the adversarial review (scratchpad exp/) ----

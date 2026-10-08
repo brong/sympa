@@ -289,7 +289,33 @@ sub _same_bytes {
 sub _strip_chain {
     my $message = shift;
     $message->delete_header($_)
-        for 'DKIM2-Signature', 'Message-Instance';
+        for 'DKIM2-Signature', 'Message-Instance', 'X-DKIM2-Info';
+}
+
+# DKIM2 implementation metadata -- update DKIM2_DATE on each change.
+use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-06';
+use constant DKIM2_REPO     => 'github.com/brong/sympa';
+use constant DKIM2_DATE     => '2026-10-08';
+use constant DKIM2_SOFTWARE => 'sympa';
+
+# X-DKIM2-Info value per draft-gondwana-dkim2-debug-header-01: a tag-list in
+# the DKIM2 syntax, every tag (the last included) followed by ";".  A ";" has
+# no escape and ends a tag, so one inside a value becomes ",".  Folded only
+# after a ";" or a "," (never inside a token, so the hn= list breaks between
+# names); X-* fields are excluded from the header hash, so folding it cannot
+# affect a signature.  Returns the value alone, folded with "\n\t".
+sub _dkim2_info {
+    my ($action, %extra) = @_;
+    my @tags = ("draft=" . DKIM2_DRAFT, "repo=" . DKIM2_REPO,
+                "date=" . DKIM2_DATE, "sw=" . DKIM2_SOFTWARE, "action=$action");
+    push @tags, "$_=$extra{$_}" for grep { defined $extra{$_} } sort keys %extra;
+    my $val = join ' ', map { (my $t = $_) =~ s/;/,/g; "$t;" } @tags;
+    # fold_header() budgets for the field name, so fold with it attached.
+    my $folded = Mail::DKIM2::Common::fold_header("X-DKIM2-Info: $val", undef,
+        delimiters_only => 1);
+    $folded =~ s/\AX-DKIM2-Info:\s*//;
+    $folded =~ s/\r\n/\n/g;
+    return $folded;
 }
 
 # The header block of $message as calculate() takes it: the fields as
@@ -300,8 +326,23 @@ sub _header_block {
     return $h;
 }
 
-# fold_header returns the field folded with "\r\n\t" and no trailing newline;
-# MIME::Head wants "\n\t" continuations and no trailing newline.
+# (count, comma-separated lower-cased names) of the header fields the
+# DKIM2 header hash covers, from an Email::MIME.
+sub _header_list_for_hash {
+    my $em = shift;
+    my @names;
+    for my $h (sort { lc($a) cmp lc($b) } $em->header_names) {
+        next if Mail::DKIM2::Common::should_skip($h);
+        push @names, (lc $h) x scalar(my @v = $em->header_raw($h));
+    }
+    return (scalar(@names), join(',', @names));
+}
+
+# Add $mi as the top Message-Instance, with the X-DKIM2-Info describing it
+# directly above.  fold_header returns the field folded with "\r\n\t" and no
+# trailing newline; MIME::Head wants "\n\t" continuations and no trailing
+# newline.  hc/hn come from the header block with the new instance in place;
+# the body is not parsed.
 sub _prepend_instance {
     my ($message, $mi) = @_;
     my $folded = Mail::DKIM2::Common::fold_header(
@@ -309,6 +350,12 @@ sub _prepend_instance {
     $folded =~ s/\AMessage-Instance:\s*//;
     $folded =~ s/\r\n/\n/g;
     $message->{_head}->add('Message-Instance', $folded, 0);
+    delete $message->{_entity_cache};
+    my ($hc, $hn) = _header_list_for_hash(
+        Mail::DKIM2::Common::parse_mime(_header_block($message)));
+    my $m = $mi->get_tag('m');
+    $message->{_head}->add('X-DKIM2-Info',
+        _dkim2_info("mi-m=$m", hc => $hc, hn => $hn), 0);
     delete $message->{_entity_cache};
 }
 
@@ -483,7 +530,8 @@ The header block as received is carried through the spools in the
 C<X-Sympa-DKIM2-Headers> pseudo-header (see L<Sympa::Message>).  Decoration
 on a DKIM2 list wraps the original body in a C<multipart/mixed> instead of
 editing it, so the body Recipe is a copy range; a body rewritten for any
-other reason gets a null body Recipe.
+other reason gets a null body Recipe.  Each instance Sympa adds has an
+C<X-DKIM2-Info> debug field directly above it.
 
 Requires Mail::DKIM2 0.15 or later, loaded on first use.  See
 F<DKIM2-MESSAGE-INSTANCE.md> for the design.
@@ -538,9 +586,10 @@ instance hashed, and that hash.
 =item egress_add ( $message, $context, [ body_rewritten =E<gt> 1 ] )
 
 Run for each copy, after every other transformation and before DKIM and
-ARC signing.  With a C<strip> context removes C<DKIM2-Signature> and
-C<Message-Instance>.  Otherwise removes C<Bcc> and C<Resent-Bcc> and adds
-the next Message-Instance.  The body Recipe is null if the body changed before the packet,
+ARC signing.  With a C<strip> context removes C<DKIM2-Signature>,
+C<Message-Instance> and C<X-DKIM2-Info>.  Otherwise removes C<Bcc> and
+C<Resent-Bcc> and adds the next Message-Instance, with its C<X-DKIM2-Info>
+above it.  The body Recipe is null if the body changed before the packet,
 C<body_rewritten> is set, or decoration fell back to editing the body;
 otherwise it is the copy range recorded by L</wrap>, or none, provided that
 it really gives back the received body.  Adds nothing if nothing changed.
