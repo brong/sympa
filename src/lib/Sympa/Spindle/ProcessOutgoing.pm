@@ -269,6 +269,10 @@ sub __twist_one {
     Sympa::DKIM2::egress_add($message, $dkim2,
         body_rewritten =>
             (($personalize_all or $smime_sign or $smime_encrypt) ? 1 : 0));
+    # The hint for the outbound signer: this copy is one of many, so its
+    # DKIM2-Signature gets the "exploded" flag (-07 section 12.5).  An X-
+    # field, so outside the DKIM2 hashes; the signer removes it.
+    $message->replace_header('X-DKIM2-Exploded', 'yes') if $dkim2;
 
     if ($message->{shelved}{dkim_sign} or %arc) {
         # apply DKIM signature AFTER any other message transformation.

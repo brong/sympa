@@ -11,9 +11,10 @@ rebuilds the message as Sympa received it.
 Sympa adds only `Message-Instance`. The `DKIM2-Signature` is added by the
 MTA's outbound signer after Sympa hands the message over.
 
-The wire format is the one in draft-ietf-dkim-dkim2-spec-06: `m=` numbers
+The wire format is the one in draft-ietf-dkim-dkim2-spec-07: `m=` numbers
 the instance, `h=` carries `alg:header-hash:body-hash`, and `r=` the base64
-JSON Recipe (`"h"` for the header fields, `"b"` for the body).
+JSON Recipe (`"h"` for the header fields, `"b"` for the body; a literal line
+or value that is not valid UTF-8 goes in a `"u"` step, base64).
 
 ## The switch
 
@@ -27,15 +28,17 @@ spools, no MIME wrap, no `Message-Instance`. Turn it on per list:
 dkim2_message_instance on
 ```
 
-If the switch is on but Mail::DKIM2 0.15 or later cannot be loaded, Sympa
+If the switch is on but Mail::DKIM2 0.23 or later cannot be loaded, Sympa
 logs at `err` (once per process) and treats the list as off.
 
 ## Dependency
 
-Mail::DKIM2 0.15 or later (`Mail::DKIM2::MessageInstance` and
-`Mail::DKIM2::Common`): `cpanm Mail::DKIM2` once 0.15 is on CPAN; until
+Mail::DKIM2 0.23 or later (`Mail::DKIM2::MessageInstance` and
+`Mail::DKIM2::Common`): `cpanm Mail::DKIM2` once 0.23 is on CPAN; until
 then install it from `perl/` in the DKIM2 interop repository
-(<https://github.com/dkim2wg/interop>). 0.15 adds the `BodyRecipe` option
+(<https://github.com/dkim2wg/interop>). 0.23 implements draft -07: the
+`"u"` Recipe step, the From-Authentic checks Sympa relies on when it
+rewrites From (below), and the `exploded` flag. 0.15 added the `BodyRecipe` option
 that lets the caller give the body Recipe instead of having it computed by
 diff, and the `BodyHash` option that lets it give the body hash, so the
 instance is calculated from the header block alone. Mail::DKIM2 is loaded
@@ -70,6 +73,9 @@ received. No plaintext ever reaches a header field.
 
 Anonymous lists skip ingress entirely: nothing about the original sender is
 kept (see the table below).
+
+A message that arrived without a `DKIM2-Signature` goes through ingress
+like any other, but at egress its chain is removed (see From rewriting).
 
 ## Decoration: always-wrap
 
@@ -220,6 +226,51 @@ runs before the DKIM2 step; on every other list it stays where stock Sympa
 has it, after DKIM and ARC signing. DomainKey-Signature removal already
 comes before the DKIM2 step.
 
+## From rewriting (draft -07 section 11)
+
+DKIM2 requires the From header field to be Authentic: its domain must be
+the signing domain (or below it) of the signature of the hop that set it,
+`i=1` for the From the message started with. A verifier fails the message
+otherwise (`matching From is not authentic`), and the outbound signer
+refuses to sign it. Sympa's hop always changes a list post (`Sender`,
+`Precedence`, `List-Id`, and so on), and some posts leave the list host
+as `i=1`. So on a DKIM2 list Sympa rewrites From to the list address on
+every post it distributes, and on every message it forwards to the owners
+or moderators (where `dmarc_protect` knows the message is one of those, the
+`-request` or `-editor` address, as stock), whatever
+`dmarc_protection.mode` says: `dmarc_protect` runs as if the mode were
+`all`, with the list's `dmarc_protection.phrase` and `other_email`, adding
+`Reply-To` and `X-Original-From` as usual.
+
+- A signed post: the original From is in the header Recipe of the instance
+  Sympa adds, and the list host's signature (`i=2` or later) covers the new
+  one.
+- A post that arrived without a `DKIM2-Signature`: the list host's
+  signature will be `i=1`, and `i=1` is checked against the From of the
+  first instance. Keeping the `m=1` added at ingress (with the author's
+  From) and recording the rewrite in `m=2` would fail that check, so the
+  chain is removed at egress, as for anonymous lists, and the outbound
+  signer starts a new one with the rewritten From. The original From is
+  in `X-Original-From` only.
+- Resends from the archive: the chain is removed (as before) and From is
+  rewritten.
+- Anonymous lists: From is `anonymous_sender`, as stock, and the chain is
+  removed.
+
+`dmarc_protection.other_email` and `anonymous_sender` must therefore be
+addresses in the list's domain (the domain the list host signs as) or below
+it. When they are not, Sympa logs a `notice` (`... is not Authentic for the
+list domain ...`) and uses them anyway; the outbound signer will then
+refuse the message.
+
+### X-DKIM2-Exploded
+
+Every copy of a DKIM2 list's distribution carries `X-DKIM2-Exploded: yes`,
+added in `ProcessOutgoing` after the per-recipient changes. It asks the
+outbound signer to set the `exploded` flag (`f=exploded`, draft -07
+section 12.5) in its `DKIM2-Signature`; the signer removes it. As an `X-`
+field it is outside the DKIM2 hashes. At `i=1` the flag is never set.
+
 ## Special cases
 
 | Case | Behaviour |
@@ -229,13 +280,14 @@ comes before the DKIM2 step.
 | txt, html, urlize, notice reception modes | null body Recipe, small header Recipe |
 | Full-body personalisation (`personalization.mail_apply_on all`) | null body Recipe per recipient |
 | Footer-only personalisation (`personalization.mail_apply_on footer`) | wrap; the copies differ only in the trailing part |
-| Anonymous list | no pseudo-header at ingress, stock decoration; egress removes `DKIM2-Signature`, `Message-Instance` and `X-DKIM2-Info`, and the outbound signer starts a new chain with `m=1` |
-| Resend from archive | on a DKIM2 list, the chain is removed as for anonymous lists |
+| Anonymous list | no pseudo-header at ingress, stock decoration; egress removes `DKIM2-Signature`, `Message-Instance` and `X-DKIM2-Info`, and the outbound signer starts a new chain with `m=1`; `anonymous_sender` must be in the list's domain |
+| Resend from archive | on a DKIM2 list, From is rewritten and the chain is removed as for anonymous lists |
+| Post that arrived without a `DKIM2-Signature` | From is rewritten and the chain is removed at egress; the outbound signer's `i=1` starts it |
 | Digests, notifications, auto-replies, direct sends, bounces | no saved header block; Sympa adds nothing (the outbound signer adds `m=1`) |
 | Messages embedded in a digest | content, left alone |
 | VERP, DSN tracking | envelope only; the instance is still computed per copy (below) |
 | MDN tracking | `Disposition-Notification-To` is set before the DKIM2 step |
-| DMARC From rewrite, subject tag, custom headers, topics, `remove_headers` | header changes, captured by the header diff at egress |
+| DMARC From rewrite (always on a DKIM2 list), subject tag, custom headers, topics, `remove_headers` | header changes, captured by the header diff at egress |
 | Moderated, held, auth-confirmed messages | the pseudo-header is in the spooled text, so the chain survives |
 | Requeued from `bad/` | likewise; ingress keeps the saved header block it finds |
 | Archive and custom archiver copies | stored without the pseudo-header |

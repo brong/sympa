@@ -3321,20 +3321,25 @@ sub dmarc_protect {
     my $list = $self->{context};
     return unless ref $list eq 'Sympa::List';
 
-    return unless $list->{'admin'}{'dmarc_protection'};
-    my @modes = @{$list->{'admin'}{'dmarc_protection'}{'mode'} || []};
-    return unless grep { $_ and $_ ne 'none' } @modes;
+    # DKIM2 lists always rewrite From: it must be Authentic for the list
+    # host's signature (Sympa::DKIM2::rewrites_from).
+    my $dkim2 = Sympa::DKIM2::rewrites_from($list);
+    my $dp    = $list->{'admin'}{'dmarc_protection'} || {};
+    my @modes = @{$dp->{'mode'} || []};
+    return unless $dkim2 or grep { $_ and $_ ne 'none' } @modes;
     $log->syslog('debug', 'DMARC protection on');
 
     my $dkim_signature = $self->get_header('DKIM-Signature');
-    my $domain_regex   = $list->{'admin'}{'dmarc_protection'}{'domain_regex'};
+    my $domain_regex   = $dp->{'domain_regex'};
 
     my $original_from = $self->get_header('From');
     my ($origName, $from_address) = _parse_nameaddr($original_from);
     $log->syslog('debug', 'From address: <%s>', $from_address);
 
     # Will this message be processed?
-    if (grep { $_ eq 'all' } @modes) {
+    if ($dkim2) {
+        $log->syslog('debug', 'Munging From for a DKIM2 list');
+    } elsif (grep { $_ eq 'all' } @modes) {
         $log->syslog('debug', 'Munging From for ALL messages');
     } elsif (
         $dkim_signature and grep {
@@ -3372,8 +3377,7 @@ sub dmarc_protect {
     }
 
     # Identify default new From address
-    my $phraseMode = $list->{'admin'}{'dmarc_protection'}{'phrase'}
-        || 'name_via_list';
+    my $phraseMode = $dp->{'phrase'} || 'name_via_list';
     my $newName;
     my $newComment;
     my $anonaddr;
@@ -3382,7 +3386,7 @@ sub dmarc_protect {
         # -request or -editor address
         $anonaddr = Sympa::get_address($list, $listtype);
     } else {
-        $anonaddr = $list->{'admin'}{'dmarc_protection'}{'other_email'};
+        $anonaddr = $dp->{'other_email'};
         $anonaddr = Sympa::get_address($list)
             unless $anonaddr and $anonaddr =~ /\@/;
         my @anonFrom = Mail::Address->parse($anonaddr);
@@ -3390,6 +3394,9 @@ sub dmarc_protect {
             $anonaddr   = $anonFrom[0]->address;
             $anonphrase = $anonFrom[0]->phrase;
         }
+        Sympa::DKIM2::check_from_address($list, $anonaddr,
+            'dmarc_protection.other_email')
+            if $dkim2 and $dp->{'other_email'};
     }
     $log->syslog('debug', 'Anonymous From: %s', $anonaddr);
 
@@ -4335,6 +4342,9 @@ String.
 
 I<Instance method>.
 Munges the C<From:> header field if we are using DMARC Protection mode.
+On a list with C<dkim2_message_instance> on (and no C<anonymous_sender>),
+always munges it, whatever C<dmarc_protection.mode> says: DKIM2 requires
+From to be Authentic for the list host's signature.  See L<Sympa::DKIM2>.
 
 Parameters:
 

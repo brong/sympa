@@ -40,7 +40,12 @@ subtest 'switch parameter' => sub {
     is_deeply $p{context}, [qw(list domain site)], 'list/domain/site';
 };
 
-my $plain = "From: a\@example.org\nTo: test\@mail.example.org\nSubject: hi\nMessage-ID: <1\@example.org>\n\nhello\n";
+# The fixtures model a post that arrived DKIM2-signed (the MTA verified it):
+# an unsigned post starts a new chain at egress instead (see the
+# "unsigned post" subtests).  Only the presence of the field matters here.
+my $sig = "DKIM2-Signature: i=1; d=example.org; fake\n";
+my $unsigned = "From: a\@example.org\nTo: test\@mail.example.org\nSubject: hi\nMessage-ID: <1\@example.org>\n\nhello\n";
+my $plain = $sig . $unsigned;
 
 subtest 'enabled' => sub {
     ok Sympa::DKIM2::enabled(list()), 'on';
@@ -48,11 +53,11 @@ subtest 'enabled' => sub {
     ok !Sympa::DKIM2::enabled('mail.example.org'), 'robot context';
 };
 
-subtest 'enabled: Mail::DKIM2 older than 0.15 counts as missing' => sub {
+subtest 'enabled: Mail::DKIM2 older than 0.23 counts as missing' => sub {
     my @err;
     no warnings 'redefine';
     local *Sympa::Log::syslog = sub { push @err, $_[2] if $_[1] eq 'err' };
-    local $Mail::DKIM2::MessageInstance::VERSION = '0.14';
+    local $Mail::DKIM2::MessageInstance::VERSION = '0.22';
     ok !Sympa::DKIM2::enabled(list()), 'not enabled';
     my $m = Sympa::Message->new($plain, context => list());
     Sympa::DKIM2::ingress($m);
@@ -423,7 +428,7 @@ subtest 'egress: no saved headers -> nothing, no error' => sub {
           "DKIM2-Signature: i=1; d=example.org; fake\n", 'info' ],
     ) {
         my ($name, $extra, $level) = @$c;
-        my $b = Sympa::Message->new($extra . $plain, context => $l);
+        my $b = Sympa::Message->new($extra . $unsigned, context => $l);
         # Captured at the source: debug lines never reach STDERR here.
         my ($ctx, @logged) = (1);
         { no warnings 'redefine';
@@ -596,7 +601,7 @@ subtest 'anonymous list strips the chain, original From nowhere' => sub {
 };
 
 subtest 'resend from archive strips the chain' => sub {
-    my $signed = "DKIM2-Signature: i=1; d=example.org; fake\n" . $plain;
+    my $signed = $plain;
     my $w = through($signed, undef, shelved => ['dkim2_strip']);
     unlike $w, qr/^(DKIM2-Signature|Message-Instance|X-DKIM2-Info):/mi,
         'stripped';
@@ -665,7 +670,7 @@ subtest 'egress: personalised footers on a large body, no MIME parse of the body
     local *Sympa::List::get_list_member =
         sub { +{email => $_[1], date => 0} };
     my $att = join '', map { encode_base64(pack('N*', $_ .. $_ + 40)) } 1 .. 2000;
-    my $raw = "From: a\@example.org\nTo: test\@mail.example.org\nSubject: big\n"
+    my $raw = $sig . "From: a\@example.org\nTo: test\@mail.example.org\nSubject: big\n"
         . "Message-ID: <big\@example.org>\nMIME-Version: 1.0\n"
         . "Content-Type: multipart/mixed; boundary=\"b1\"\n\n"
         . "--b1\nContent-Type: text/plain\n\nsee attached\n"
@@ -715,7 +720,7 @@ subtest 'X-DKIM2-Info above each instance Sympa adds' => sub {
     my ($info) = $w =~ /\AX-DKIM2-Info: (.*?)\r\n(?![ \t])/s;
     $info =~ s/\r\n[ \t]+/ /g;
     like $info, qr/\A(?:[a-z0-9-]+=[^;]*; ?)+\z/, 'tag-list, every tag ends in ;';
-    like $info, qr/draft=ietf-dkim-dkim2-spec-06;/, 'draft';
+    like $info, qr/draft=ietf-dkim-dkim2-spec-07;/, 'draft';
     like $info, qr/hc=\d+; hn=[a-z0-9,-]+;/, 'hashed header count and names';
 };
 
@@ -732,7 +737,7 @@ sub visible_headers { my $w = shift;
 # The m=2 field of a wire text (folded, as sent).
 sub top_field { ($_[0] =~ /^(Message-Instance: m=2;.*?)\r\n(?![ \t])/ms)[0] // '' }
 
-my $rhdr = "From: Alice <a\@example.com>\nTo: test\@mail.example.org\nSubject: hello\nMessage-ID: <%s\@example.com>\nDate: Mon, 5 Oct 2026 10:00:00 +0000\nMIME-Version: 1.0\n";
+my $rhdr = $sig . "From: Alice <a\@example.com>\nTo: test\@mail.example.org\nSubject: hello\nMessage-ID: <%s\@example.com>\nDate: Mon, 5 Oct 2026 10:00:00 +0000\nMIME-Version: 1.0\n";
 sub rmsg { my ($id, $rest) = @_; sprintf($rhdr, $id) . $rest }
 
 subtest 'review: real decorate cases' => sub {
@@ -786,7 +791,7 @@ subtest 'review: real decorate cases' => sub {
 # The review's QP and charset bugs were in append mode (stock in-place
 # editing); with DKIM2 on, append and mime both wrap.
 subtest 'review: QP post' => sub {
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: qp\nMessage-ID: <qp1\@example.com>\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\n"
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: qp\nMessage-ID: <qp1\@example.com>\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\n"
         . "Caf=C3=A9 au lait, 1+1=3D2. This is a long line that goes past the soft br=\neak boundary so QP had to wrap it.\n";
     my $text = "Caf\xc3\xa9 au lait, 1+1=2. This is a long line that goes past the soft break boundary so QP had to wrap it.\n";
     local %FILES;
@@ -816,7 +821,7 @@ subtest 'review: QP post' => sub {
 };
 
 subtest 'review: non-ASCII footer on a us-ascii post' => sub {
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: as\nMessage-ID: <as\@x>\nMIME-Version: 1.0\nContent-Type: text/plain; charset=us-ascii\n\nplain ascii\n";
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: as\nMessage-ID: <as\@x>\nMIME-Version: 1.0\nContent-Type: text/plain; charset=us-ascii\n\nplain ascii\n";
     my $footer = "Euro \xe2\x82\xac, \xe6\x97\xa5\xe6\x9c\xac\n";
     local %FILES;
     set_file('message_footer', $footer);
@@ -835,7 +840,7 @@ subtest 'review: non-ASCII footer on a us-ascii post' => sub {
 };
 
 subtest 'review: S/MIME encryption after decorate -> null, no plaintext in headers' => sub {
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: secret\nMessage-ID: <s\@x>\nMIME-Version: 1.0\nContent-Type: text/plain\n\nThe merger closes on Friday; password is hunter2.\n";
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: secret\nMessage-ID: <s\@x>\nMIME-Version: 1.0\nContent-Type: text/plain\n\nThe merger closes on Friday; password is hunter2.\n";
     my $l = list();
     my $m = Sympa::Message->new($raw, context => $l);
     Sympa::DKIM2::ingress($m);
@@ -866,7 +871,7 @@ subtest 'review: S/MIME encryption after decorate -> null, no plaintext in heade
 };
 
 subtest 'review: moderation round trip' => sub {
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: mod\nMessage-ID: <mod\@x>\nMIME-Version: 1.0\nContent-Type: text/plain\n\nplease moderate\n";
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: mod\nMessage-ID: <mod\@x>\nMIME-Version: 1.0\nContent-Type: text/plain\n\nplease moderate\n";
     local %FILES;
     set_file('message_footer', "-- \nfooter\n");
     my $l = list();
@@ -888,7 +893,7 @@ subtest 'review: moderation round trip' => sub {
 
 subtest 'review: notice mode -> null, small instance' => sub {
     my $att = encode_base64(join '', map { chr(($_ * 7919) % 256) } 1 .. 300000);
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: big\nMessage-ID: <big\@x>\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=B\n\n--B\nContent-Type: text/plain\n\nsee attached\n--B\nContent-Type: application/octet-stream; name=a.bin\nContent-Disposition: attachment; filename=a.bin\nContent-Transfer-Encoding: base64\n\n$att--B--\n";
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: big\nMessage-ID: <big\@x>\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=B\n\n--B\nContent-Type: text/plain\n\nsee attached\n--B\nContent-Type: application/octet-stream; name=a.bin\nContent-Disposition: attachment; filename=a.bin\nContent-Transfer-Encoding: base64\n\n$att--B--\n";
     my $w = through($raw, undef,
         pre => sub { $_[0]->prepare_message_according_to_mode('notice', $_[1]) },
         decorate => 0);
@@ -900,7 +905,7 @@ subtest 'review: notice mode -> null, small instance' => sub {
 subtest 'review: txt mode -> null, small instance' => sub {
     my $txt  = join '', map { "line $_ with caf\xc3\xa9 text\n" } 1 .. 40;
     my $html = "<html><body>" . join('', map { "<p>para $_ caf&eacute;</p>\n" } 1 .. 200) . "</body></html>\n";
-    my $raw = "From: a\@example.com\nTo: test\@mail.example.org\nSubject: alt\nMessage-ID: <alt\@x>\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=ALT\n\n--ALT\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\n"
+    my $raw = $sig . "From: a\@example.com\nTo: test\@mail.example.org\nSubject: alt\nMessage-ID: <alt\@x>\nMIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=ALT\n\n--ALT\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\n"
         . encode_base64($txt) . "--ALT\nContent-Type: text/html; charset=utf-8\n\n$html--ALT--\n";
     local %FILES;
     set_file('message_footer', "-- \nfooter\n");
@@ -979,7 +984,7 @@ subtest 'review: upstream m=1 kept' => sub {
         my ($name, $raw) = @$c;
         (my $crlf = $raw) =~ s/\n/\r\n/g;
         my $up = Mail::DKIM2::MessageInstance->calculate($crlf)->as_string;
-        my $w = through("Message-Instance: $up\n$raw");
+        my $w = through($sig . "Message-Instance: $up\n$raw");
         my @m1 = map { s/\r\n[ \t]+/ /gr } $w =~ /^Message-Instance: (m=1;.*?)\r\n(?![ \t])/msg;
         is scalar(@m1), 1, "$name: one m=1";
         is $m1[0] =~ s/\s+//gr, $up =~ s/\s+//gr, "$name: upstream m=1 kept";
@@ -988,6 +993,192 @@ subtest 'review: upstream m=1 kept' => sub {
         ok $mi && !$mi->unrecoverable, "$name: m=2, body recoverable";
         chain_ok($w, "$name: verifies");
     }
+};
+
+# ---- draft -07 ----
+
+# The MTA's part, for real: Ed25519 keys per domain, the outbound milter's
+# signing (m=1 for a message with no instance) and a downstream verifier.
+# example.com is the author's domain, mail.example.org the list host's.
+use Mail::DKIM2::Signer; use Mail::DKIM2::Verifier; use Crypt::PK::Ed25519;
+my %KEY;
+sub key_for { $KEY{$_[0]} //= do { my $k = Crypt::PK::Ed25519->new; $k->generate_key; $k } }
+sub mta_sign { my ($w, $d, %o) = @_;
+    unless ($w =~ /^Message-Instance:/mi) {
+        my $mi = Mail::DKIM2::MessageInstance->calculate($w);
+        $w = Mail::DKIM2::Common::fold_header(
+            'Message-Instance: ' . $mi->as_string) . "\r\n" . $w;
+    }
+    my $s = Mail::DKIM2::Signer->new(Domain => $d, Selector => 's',
+        Key => key_for($d), Algorithm => 'ed25519-sha256', %o);
+    $s->load($w);
+    return (undef, $s->result_detail) unless ($s->result // '') eq 'signed';
+    return ($s->as_string . "\r\n" . $w);
+}
+sub mta_verify { my $w = shift;
+    my $v = Mail::DKIM2::Verifier->new(PubkeyCallback => sub {
+        my $k = $KEY{$_[0]->domain} or return undef;
+        Crypt::PK::Ed25519->new(\$k->export_key_der('public')) })->load($w);
+    return ($v->result, $v->result_detail) }
+# The m=2 Recipe as sent: the JSON in its r= tag.
+sub top_recipe_json { my ($r) = top_field(shift) =~ /\br=([^;]+)/ or return {};
+    require JSON::PP; JSON::PP->new->decode(decode_base64($r =~ s/\s+//gr)) }
+sub from_of { my $w = shift; (($w =~ /^From: ((?:[^\r\n]|\r\n[ \t])*)/m)[0] // '') =~ s/\r\n[ \t]+/ /gr }
+# A post signed by its author's domain, LF line ends as Sympa spools it.
+sub author_signed { my $id = shift;
+    my ($s, $why) = mta_sign("From: Alice <a\@example.com>\r\nTo: test\@mail.example.org\r\nSubject: hello\r\nMessage-ID: <$id\@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nhello\r\n",
+        'example.com', MailFrom => '<a@example.com>', RcptTo => ['<test@mail.example.org>']);
+    die "author signing failed: $why\n" unless $s;
+    return $s =~ s/\r\n/\n/gr }
+# The list host's MTA signs a copy and a downstream verifier checks it.
+sub list_hop_ok { my ($w, $name, %o) = @_;
+    my ($s, $why) = mta_sign($w, 'mail.example.org',
+        MailFrom => '<test-owner@mail.example.org>', RcptTo => ['<r1@example.net>'], %o);
+    ok $s, "$name: the list host signs" or return diag $why;
+    my ($res, $detail) = mta_verify($s);
+    is $res, 'pass', "$name: verifies downstream" or diag $detail;
+    return $s }
+
+subtest '-07: non-UTF-8 header change gives a "u" step' => sub {
+    local %FILES;
+    my $raw = $sig . "From: a\@example.org\nTo: test\@mail.example.org\nSubject: caf\xe9\nMessage-ID: <u1\@example.org>\n\nhello\n";
+    my $w = through($raw, sub { $_[0]->replace_header('Subject', '[test] x') });
+    my @steps = @{ top_recipe_json($w)->{h}{subject} || [] };
+    my ($u) = grep { exists $_->{u} } @steps;
+    ok $u, 'a "u" step' or diag explain \@steps;
+    like decode_base64($u->{u}[0] // ''), qr/caf\xe9\z/, 'holds the raw octets';
+    ok !(grep { exists $_->{b} } @steps), 'no "b" step';
+    chain_ok($w, 'verifies');
+};
+
+subtest '-07: every distribution copy carries X-DKIM2-Exploded: yes' => sub {
+    my $l = list();
+    my $m = Sympa::Message->new($plain, context => $l);
+    Sympa::DKIM2::ingress($m);
+    my $b = Sympa::Message->new($m->to_string, context => $l);
+    my ($stored) = twist_one($b, Sympa::DKIM2::egress_context($b));
+    my $w = $stored->[0]->as_rfc822_string;
+    is scalar(() = $w =~ /^X-DKIM2-Exploded: yes\r$/mg), 1, 'hint header, once';
+    chain_ok($w, 'outside the hashes: still verifies');
+
+    my $off = Sympa::Message->new($plain, context => list(dkim2_message_instance => 'off'));
+    ($stored) = twist_one($off, Sympa::DKIM2::egress_context($off));
+    unlike $stored->[0]->as_string, qr/^X-DKIM2-Exploded:/m, 'switch off: none';
+};
+
+subtest '-07: DKIM2 lists rewrite From to the list address' => sub {
+    my $m = Sympa::Message->new($plain, context => list());
+    $m->dmarc_protect;
+    like $m->get_header('From'), qr/<test\@mail\.example\.org>\z/, 'list address';
+    is $m->get_header('X-Original-From'), 'a@example.org', 'X-Original-From';
+
+    my $o = Sympa::Message->new($plain, context => list());
+    $o->{listtype} = 'owner';
+    $o->dmarc_protect;
+    like $o->get_header('From'), qr/<test-request\@mail\.example\.org>\z/, 'owner: -request address';
+
+    for my $c ([off => list(dkim2_message_instance => 'off')],
+               [anonymous => list(anonymous_sender => 'anon@mail.example.org')]) {
+        my $n = Sympa::Message->new($plain, context => $c->[1]);
+        $n->dmarc_protect;
+        is $n->get_header('From'), 'a@example.org', "$c->[0]: unchanged";
+    }
+};
+
+subtest '-07: From rewrite is shelved on DKIM2 lists' => sub {
+    require Sympa::Spindle::ToList;
+    no warnings qw(redefine once);
+    local *Sympa::Spool::Outgoing::new = sub { bless {}, shift };
+    local *Sympa::Spool::Outgoing::store = sub { 1 };
+    for my $c ([on => list(), 1], [off => list(dkim2_message_instance => 'off'), 0],
+               [anonymous => list(anonymous_sender => 'anon@mail.example.org'), 0]) {
+        my ($name, $l, $want) = @$c;
+        my $m = Sympa::Message->new($plain, context => $l);
+        Sympa::Spindle::ToList::_mail_message($m, ['r@example.net']);
+        is !!$m->{shelved}{dmarc_protect}, !!$want, "ToList, $name";
+    }
+};
+
+subtest '-07: unsigned post: From rewritten, the MTA starts the chain' => sub {
+    local %FILES;
+    set_file('message_footer', "-- \nfooter\n");
+    my $l = list();
+    my $m = Sympa::Message->new($unsigned, context => $l);
+    Sympa::DKIM2::ingress($m);
+    my $b = Sympa::Message->new($m->to_string, context => $l);
+    is_deeply Sympa::DKIM2::egress_context($b), {strip => 1}, 'chain stripped at egress';
+
+    # Unchanged From: the list host may not sign it (From not Authentic).
+    my $w = through($unsigned, undef);
+    my (undef, $why) = mta_sign($w, 'mail.example.org');
+    like $why // '', qr/From header field is not Authentic for d=mail\.example\.org/,
+        'author From: the MTA refuses';
+
+    $w = through($unsigned, sub { $_[0]->dmarc_protect });
+    unlike $w, qr/^(Message-Instance|X-DKIM2-Info|DKIM2-Signature):/mi,
+        'no instance: the i=1 hop originates the chain';
+    like from_of($w), qr/<test\@mail\.example\.org>$/, 'From is the list address';
+    list_hop_ok($w, 'i=1');
+};
+
+subtest '-07: signed post changed by the list: From rewritten, original in the Recipe' => sub {
+    local %FILES;
+    set_file('message_footer', "-- \nfooter\n");
+    my $w = through(author_signed('s7'), sub {
+        $_[0]->dmarc_protect;
+        $_[0]->replace_header('Subject', '[test] hello') });
+    like from_of($w), qr/<test\@mail\.example\.org>$/, 'From is the list address';
+    my $from = top_recipe_json($w)->{h}{from};
+    ok $from, 'From in the header Recipe of m=2';
+    like join("\n", map { @{ $_->{d} || [] } } @{ $from || [] }),
+        qr/Alice <a\@example\.com>/, 'original From in the Recipe';
+    my $s = list_hop_ok($w, 'i=2', Exploded => 1);
+    like $s // '', qr/^DKIM2-Signature: [^\r\n]*(?:\r\n[ \t][^\r\n]*)*?f=[^;]*exploded/m,
+        'f=exploded at i=2';
+};
+
+subtest '-07: resend from the archive: From rewritten, new chain' => sub {
+    require Sympa::Spindle::ToList;
+    no warnings qw(redefine once);
+    local *Sympa::Spool::Outgoing::new = sub { bless {}, shift };
+    local *Sympa::Spool::Outgoing::store = sub { 1 };
+    local %FILES;
+    my $l = list();
+    my $a = Sympa::Message->new(author_signed('ra'), context => $l);
+    $a->{shelved}{dkim2_strip} = 1;        # as ResendArchive sets it
+    Sympa::Spindle::ToList::_mail_message($a, ['r@example.net']);
+    ok $a->{shelved}{dmarc_protect}, 'From rewrite shelved';
+    my $ctx = Sympa::DKIM2::egress_context($a);
+    $a->dmarc_protect;
+    my $one = $a->dup;
+    Sympa::DKIM2::egress_add($one, $ctx);
+    my $w = $one->as_rfc822_string;
+    unlike $w, qr/^(Message-Instance|DKIM2-Signature):/mi, 'chain stripped';
+    like from_of($w), qr/<test\@mail\.example\.org>$/, 'From is the list address';
+    list_hop_ok($w, 'i=1');
+};
+
+subtest '-07: From addresses outside the list domain are logged' => sub {
+    my @warn;
+    no warnings 'redefine';
+    local *Sympa::Log::syslog = sub { my (undef, $lv, $f, @a) = @_;
+        push @warn, sprintf($f, map { $_ // '' } @a) if $lv eq 'notice' };
+    my $m = Sympa::Message->new($plain,
+        context => list(dmarc_protection => {other_email => 'x@elsewhere.net'}));
+    $m->dmarc_protect;
+    like $m->get_header('From'), qr/x\@elsewhere\.net/, 'other_email used as configured';
+    is scalar(grep { /other_email.*not Authentic/ } @warn), 1, 'other_email warned';
+
+    @warn = ();
+    my $ok = Sympa::Message->new($plain,
+        context => list(dmarc_protection => {other_email => 'x@sub.mail.example.org'}));
+    $ok->dmarc_protect;
+    is scalar(@warn), 0, 'address below the list domain: no warning';
+
+    my $an = Sympa::Message->new($plain,
+        context => list(anonymous_sender => 'anon@elsewhere.net'));
+    Sympa::DKIM2::egress_context($an);
+    is scalar(grep { /anonymous_sender.*not Authentic/ } @warn), 1, 'anonymous_sender warned';
 };
 
 done_testing;
