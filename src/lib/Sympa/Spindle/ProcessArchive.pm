@@ -93,7 +93,7 @@ sub _twist {
                 'custom_archiver.' . [split /\//, $message->get_id]->[0];
 
             if (open my $fh, '>', $Conf::Conf{'tmpdir'} . '/' . $tmpfile) {
-                print $fh $message->to_string(original => 1);
+                print $fh _custom_archiver_text($message);
                 close $fh;
             } else {
                 $log->syslog('err', 'Can\'t open temporary file for %s: %m',
@@ -465,6 +465,17 @@ sub _mail2arc {
         return undef;
     }
     return 1;
+}
+
+# Serialized message for the custom archiver.  The DKIM2 saved header block
+# is for the outbound signer, not for archives; leave it out of this copy
+# only (the message being delivered keeps it).
+sub _custom_archiver_text {
+    my $message = shift;
+
+    local $message->{'dkim2_headers'};
+    delete $message->{'dkim2_headers'};
+    return $message->to_string(original => 1);
 }
 
 1;
