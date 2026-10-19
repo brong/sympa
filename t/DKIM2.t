@@ -1064,6 +1064,12 @@ subtest '-07: every distribution copy carries X-DKIM2-Exploded: yes' => sub {
     my $off = Sympa::Message->new($plain, context => list(dkim2_message_instance => 'off'));
     ($stored) = twist_one($off, Sympa::DKIM2::egress_context($off));
     unlike $stored->[0]->as_string, qr/^X-DKIM2-Exploded:/m, 'switch off: none';
+
+    # A DKIM2 list's copy with no egress context (no saved header block).
+    my $nb = Sympa::Message->new($plain, context => $l);
+    ($stored) = twist_one($nb, undef);
+    like $stored->[0]->as_string, qr/^X-DKIM2-Exploded: yes$/m,
+        'no context: hint all the same';
 };
 
 subtest '-07: DKIM2 lists rewrite From to the list address' => sub {
@@ -1099,14 +1105,36 @@ subtest '-07: From rewrite is shelved on DKIM2 lists' => sub {
     }
 };
 
-subtest '-07: unsigned post: From rewritten, the MTA starts the chain' => sub {
+subtest '-07: DoForward shelves the From rewrite on DKIM2 lists' => sub {
+    require Sympa::Spindle::DoForward;
+    no warnings qw(redefine once);
+    my @stored;
+    local *Sympa::Spindle::DoForward::_splicing_to = sub { 'Sympa::Spindle::DoForward' };
+    local *Sympa::List::get_admins_email = sub { ('owner@example.net') };
+    local *Sympa::Spool::Outgoing::new = sub { bless {}, shift };
+    local *Sympa::Spool::Outgoing::store = sub { push @stored, $_[1]; 1 };
+    for my $c ([on => list(), 1], [off => list(dkim2_message_instance => 'off'), 0]) {
+        my ($name, $l, $want) = @$c;
+        my $m = Sympa::Message->new($plain, context => $l);
+        @$m{qw(listtype spam_status sender)} = ('owner', 'ham', 'a@example.org');
+        my $spindle = bless {}, 'Sympa::Spindle::DoForward';
+        my $ok;
+        { local *STDERR; open STDERR, '>', \my $err or die; $ok = $spindle->_twist($m) }
+        ok $ok, "$name: forwarded";
+        is !!$m->{shelved}{dmarc_protect}, !!$want, "$name: From rewrite "
+            . ($want ? 'shelved' : 'not shelved');
+    }
+    is scalar(@stored), 2, 'both stored';
+};
+
+subtest '-07: unsigned post: From rewritten, one m=1 with a Recipe back' => sub {
     local %FILES;
     set_file('message_footer', "-- \nfooter\n");
     my $l = list();
     my $m = Sympa::Message->new($unsigned, context => $l);
     Sympa::DKIM2::ingress($m);
     my $b = Sympa::Message->new($m->to_string, context => $l);
-    is_deeply Sympa::DKIM2::egress_context($b), {strip => 1}, 'chain stripped at egress';
+    ok Sympa::DKIM2::egress_context($b)->{unsigned}, 'context marked unsigned';
 
     # Unchanged From: the list host may not sign it (From not Authentic).
     my $w = through($unsigned, undef);
@@ -1115,9 +1143,18 @@ subtest '-07: unsigned post: From rewritten, the MTA starts the chain' => sub {
         'author From: the MTA refuses';
 
     $w = through($unsigned, sub { $_[0]->dmarc_protect });
-    unlike $w, qr/^(Message-Instance|X-DKIM2-Info|DKIM2-Signature):/mi,
-        'no instance: the i=1 hop originates the chain';
+    my @mi = $w =~ /^Message-Instance: (m=\d+);/mg;
+    is_deeply \@mi, ['m=1'], 'exactly one instance, m=1';
+    is scalar(() = $w =~ /^X-DKIM2-Info: /mg), 1, 'one X-DKIM2-Info';
+    like $w, qr/\AX-DKIM2-Info: (?:[^\r\n]|\r\n[ \t])*?action=mi-m=1;.*?\r\nMessage-Instance: m=1;/s,
+        'X-DKIM2-Info above it';
     like from_of($w), qr/<test\@mail\.example\.org>$/, 'From is the list address';
+    my ($v) = $w =~ /^Message-Instance: (m=1;.*?)\r\n(?![ \t])/ms;
+    my $mi1 = Mail::DKIM2::MessageInstance->parse($v);
+    ok !$mi1->unrecoverable, 'body Recipe: the wrap copy range';
+    my $prev = Mail::DKIM2::MessageInstance->undo($w)->as_string;
+    like $prev, qr/^From: a\@example\.org\r$/m, 'Recipe restores the original From';
+    like $prev, qr/\r\n\r\nhello\r\n\z/, 'and the original body';
     list_hop_ok($w, 'i=1');
 };
 

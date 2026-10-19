@@ -72,7 +72,7 @@ sub anonymous {
 # list host signs i=1, or when its hop changes the message.  Sympa's hop
 # always changes a list post (Sender, Precedence, List-Id ...), and a
 # post that arrived unsigned, a resend from the archive and an anonymous
-# list all start a new chain.  Anonymous lists set From to anonymous_sender
+# list all leave the list host as i=1.  Anonymous lists set From to anonymous_sender
 # themselves, so they are left out here.
 sub rewrites_from {
     my $list = shift;
@@ -143,12 +143,13 @@ sub egress_context {
             $message);
         return undef;
     }
-    # Arrived unsigned: the list host's signature will be i=1, so the From
-    # it sees has to be Authentic in state 1 too (-07 section 11).  Sympa
-    # rewrites From, so the received instance cannot be kept; the outbound
-    # signer starts the chain.
-    return {strip => 1}
-        unless $message->{'dkim2_headers'} =~ /^DKIM2-Signature:/mi;
+    # Arrived unsigned: the list host's signature will be i=1, and i=1 is
+    # checked against the From of state 1 (-07 section 11), which Sympa
+    # rewrites.  So the copy leaves with a single instance, m=1, describing
+    # it as sent, with a Recipe back to the message as received (-07
+    # section 12.1: the first instance may record changes made as the
+    # message enters DKIM2); see egress_add.
+    my $unsigned = $message->{'dkim2_headers'} !~ /^DKIM2-Signature:/mi;
     my $ctx = eval {
         (my $prev = $message->{'dkim2_headers'} . "\n") =~ s/\r?\n/\r\n/g;
         my ($ok, $why) =
@@ -160,6 +161,7 @@ sub egress_context {
             Mail::DKIM2::MessageInstance::body_digest_raw($message->{_body})
             eq $top->body_hash;
         {   prev      => $prev,
+            ($unsigned ? (unsigned => 1) : ()),
             unchanged => ($unchanged ? 1 : 0),
             body_hash => $top->body_hash,
             ($unchanged ? (orig_body => $message->{_body} // '') : ())
@@ -234,11 +236,24 @@ sub egress_add {
             and $br eq 'none'
             and !$mi->get_tag('rh')
             and !$mi->get_tag('rb');
+        if ($ctx->{unsigned}) {
+            # The one instance of a chain the list host's i=1 starts:
+            # m=1, replacing the one(s) the message arrived with.  Header
+            # and body hashes and Recipes do not cover Message-Instance
+            # fields, so only the number changes.
+            $mi->set_tag('m', 1);
+            _strip_chain($message);
+        }
         _prepend_instance($message, $mi);
         1;
-    } or $log->syslog('err',
-        'DKIM2: Message-Instance for %s failed: %s; sent without it',
-        $message, $EVAL_ERROR);
+    } or do {
+        $log->syslog('err',
+            'DKIM2: Message-Instance for %s failed: %s; sent without it',
+            $message, $EVAL_ERROR);
+        # An instance describing the message as received would not match
+        # it: let the outbound signer start the chain.
+        eval { _strip_chain($message) } if $ctx->{unsigned};
+    };
 }
 
 # True if the copy Recipe $br ([] or [[first, last]], from wrap()) applied
@@ -320,8 +335,9 @@ sub _same_bytes {
     return 1;
 }
 
-# Anonymous lists, resends from the archive and posts that arrived unsigned
-# start a new chain: the outbound signer then adds a fresh m=1.
+# Anonymous lists and resends from the archive start a new chain: the
+# outbound signer then adds a fresh m=1.  Posts that arrived unsigned get
+# their own m=1 in place of the chain (egress_add).
 sub _strip_chain {
     my $message = shift;
     $message->delete_header($_)
@@ -638,10 +654,11 @@ Run once per packet in ProcessOutgoing, before any per-recipient change.
 Returns C<undef> if nothing is to be added (switch off, no saved header
 block, or a saved block that does not verify; a missing block is logged at
 C<info> if the message carries a DKIM2 chain, else at C<debug>), C<< {strip =E<gt> 1} >> for
-anonymous lists, resends from the archive and messages that arrived without
-a DKIM2-Signature (the outbound signer's i=1 starts the chain), or a context for
+anonymous lists and resends from the archive, or a context for
 L</egress_add>: the saved block, whether the body is still the one the top
-instance hashed, and that hash.
+instance hashed, and that hash.  For a message that arrived without a
+DKIM2-Signature the context is marked C<unsigned>: the list host's
+signature will be i=1.
 
 =item egress_add ( $message, $context, [ body_rewritten =E<gt> 1 ] )
 
@@ -649,7 +666,10 @@ Run for each copy, after every other transformation and before DKIM and
 ARC signing.  With a C<strip> context removes C<DKIM2-Signature>,
 C<Message-Instance> and C<X-DKIM2-Info>.  Otherwise removes C<Bcc> and
 C<Resent-Bcc> and adds the next Message-Instance, with its C<X-DKIM2-Info>
-above it.  The body Recipe is null if the body changed before the packet,
+above it.  With an C<unsigned> context the instance is C<m=1> and replaces
+the instances the message arrived with: one instance whose Recipe goes back
+to the message as received (the original From included), for the list
+host's i=1 to sign.  The body Recipe is null if the body changed before the packet,
 C<body_rewritten> is set, or decoration fell back to editing the body;
 otherwise it is the copy range recorded by L</wrap>, or none, provided that
 it really gives back the received body.  Adds nothing if nothing changed.

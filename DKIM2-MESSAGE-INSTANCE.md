@@ -75,7 +75,8 @@ Anonymous lists skip ingress entirely: nothing about the original sender is
 kept (see the table below).
 
 A message that arrived without a `DKIM2-Signature` goes through ingress
-like any other, but at egress its chain is removed (see From rewriting).
+like any other; at egress its instance is replaced by a single `m=1` (see
+From rewriting).
 
 ## Decoration: always-wrap
 
@@ -248,10 +249,13 @@ or moderators (where `dmarc_protect` knows the message is one of those, the
 - A post that arrived without a `DKIM2-Signature`: the list host's
   signature will be `i=1`, and `i=1` is checked against the From of the
   first instance. Keeping the `m=1` added at ingress (with the author's
-  From) and recording the rewrite in `m=2` would fail that check, so the
-  chain is removed at egress, as for anonymous lists, and the outbound
-  signer starts a new one with the rewritten From. The original From is
-  in `X-Original-From` only.
+  From) and recording the rewrite in `m=2` would fail that check. So the
+  copy leaves with a single instance, `m=1`, carrying the hashes of the
+  rewritten, decorated copy and a Recipe back to the message as received:
+  the original From in the header Recipe, the wrap's copy range in the body
+  Recipe (-07 section 12.1 lets the first instance record changes made as
+  the message enters DKIM2). It replaces the instance(s) the message
+  arrived with. The list host signs it as `i=1`.
 - Resends from the archive: the chain is removed (as before) and From is
   rewritten.
 - Anonymous lists: From is `anonymous_sender`, as stock, and the chain is
@@ -266,7 +270,8 @@ refuse the message.
 ### X-DKIM2-Exploded
 
 Every copy of a DKIM2 list's distribution carries `X-DKIM2-Exploded: yes`,
-added in `ProcessOutgoing` after the per-recipient changes. It asks the
+added in `ProcessOutgoing` after the per-recipient changes, whether or not
+Sympa added an instance to it. It asks the
 outbound signer to set the `exploded` flag (`f=exploded`, draft -07
 section 12.5) in its `DKIM2-Signature`; the signer removes it. As an `X-`
 field it is outside the DKIM2 hashes. At `i=1` the flag is never set.
@@ -282,7 +287,7 @@ field it is outside the DKIM2 hashes. At `i=1` the flag is never set.
 | Footer-only personalisation (`personalization.mail_apply_on footer`) | wrap; the copies differ only in the trailing part |
 | Anonymous list | no pseudo-header at ingress, stock decoration; egress removes `DKIM2-Signature`, `Message-Instance` and `X-DKIM2-Info`, and the outbound signer starts a new chain with `m=1`; `anonymous_sender` must be in the list's domain |
 | Resend from archive | on a DKIM2 list, From is rewritten and the chain is removed as for anonymous lists |
-| Post that arrived without a `DKIM2-Signature` | From is rewritten and the chain is removed at egress; the outbound signer's `i=1` starts it |
+| Post that arrived without a `DKIM2-Signature` | From is rewritten; the copy leaves with one `m=1` whose Recipe goes back to the message as received; the outbound signer's `i=1` signs it |
 | Digests, notifications, auto-replies, direct sends, bounces | no saved header block; Sympa adds nothing (the outbound signer adds `m=1`) |
 | Messages embedded in a digest | content, left alone |
 | VERP, DSN tracking | envelope only; the instance is still computed per copy (below) |
