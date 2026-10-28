@@ -53,11 +53,11 @@ subtest 'enabled' => sub {
     ok !Sympa::DKIM2::enabled('mail.example.org'), 'robot context';
 };
 
-subtest 'enabled: Mail::DKIM2 older than 0.23 counts as missing' => sub {
+subtest 'enabled: Mail::DKIM2 older than 0.28 counts as missing (draft -08)' => sub {
     my @err;
     no warnings 'redefine';
     local *Sympa::Log::syslog = sub { push @err, $_[2] if $_[1] eq 'err' };
-    local $Mail::DKIM2::MessageInstance::VERSION = '0.22';
+    local $Mail::DKIM2::MessageInstance::VERSION = '0.27';
     ok !Sympa::DKIM2::enabled(list()), 'not enabled';
     my $m = Sympa::Message->new($plain, context => list());
     Sympa::DKIM2::ingress($m);
@@ -720,7 +720,7 @@ subtest 'X-DKIM2-Info above each instance Sympa adds' => sub {
     my ($info) = $w =~ /\AX-DKIM2-Info: (.*?)\r\n(?![ \t])/s;
     $info =~ s/\r\n[ \t]+/ /g;
     like $info, qr/\A(?:[a-z0-9-]+=[^;]*; ?)+\z/, 'tag-list, every tag ends in ;';
-    like $info, qr/draft=ietf-dkim-dkim2-spec-07;/, 'draft';
+    like $info, qr/draft=ietf-dkim-dkim2-spec-08;/, 'draft';
     like $info, qr/hc=\d+; hn=[a-z0-9,-]+;/, 'hashed header count and names';
 };
 
