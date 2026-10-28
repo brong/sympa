@@ -4902,6 +4902,19 @@ our %pinfo = (
         not_before => '6.2.74',
     },
 
+    dkim2_message_instance => {
+        context    => [qw(list domain site)],
+        order      => 70.09,
+        group      => 'dkim',
+        gettext_id => 'Add DKIM2 Message-Instance header fields',
+        gettext_comment =>
+            'If set to "on", Sympa records what it changed in each message in a DKIM2 Message-Instance header field (draft-ietf-dkim-dkim2-spec), wraps decorated messages in a MIME container so the original body is carried unchanged, and marks the body unrecoverable when it rewrites it. Requires the Mail::DKIM2 Perl module; the DKIM2-Signature itself is added by the MTA.',
+        format     => ['on', 'off'],
+        occurrence => '1',
+        default    => 'off',
+        not_before => '6.2.78',
+    },
+
     ### Optional features
 
     ### List address verification
