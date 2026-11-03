@@ -33,6 +33,7 @@ use Time::HiRes qw();
 
 use Sympa;
 use Conf;
+use Sympa::DKIM2;
 use Sympa::Log;
 use Sympa::Spool::Outgoing;
 use Sympa::Spool::Topic;
@@ -401,10 +402,12 @@ sub _mail_message {
     my $list = $message->{context};
 
     # Shelve DMARC protection, unless anonymization feature is enabled.
+    # DKIM2 lists always rewrite From (Sympa::DKIM2::rewrites_from).
     $message->{shelved}{dmarc_protect} = 1
-        if $list->{'admin'}{'dmarc_protection'}
-        and $list->{'admin'}{'dmarc_protection'}{'mode'}
-        and not $list->{'admin'}{'anonymous_sender'};
+        if (    $list->{'admin'}{'dmarc_protection'}
+            and $list->{'admin'}{'dmarc_protection'}{'mode'}
+            and not $list->{'admin'}{'anonymous_sender'})
+        or Sympa::DKIM2::rewrites_from($list);
 
     # Shelve personalization if not yet shelved.
     # Note that only 'footer' mode will be allowed unless otherwise requested.

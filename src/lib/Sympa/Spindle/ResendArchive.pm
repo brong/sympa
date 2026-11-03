@@ -32,6 +32,7 @@ use warnings;
 
 use Sympa;
 use Conf;
+use Sympa::DKIM2;
 use Sympa::Language;
 use Sympa::Log;
 use Sympa::Tools::Text;
@@ -99,6 +100,12 @@ sub _twist {
     # Decrpyt message.
     # If encrypted, it will be re-encrypted by succeeding processes.
     $message->smime_decrypt;
+
+    # DKIM2: the archived copy can't describe the message as received, so
+    # the resend starts a new chain (Sympa::DKIM2).  Only on DKIM2 lists:
+    # with the switch off the spooled message stays as stock.
+    $message->{shelved}{dkim2_strip} = 1
+        if Sympa::DKIM2::enabled($self->{context});
 
     # Assign privileges of resending user to the message.
     $message->{envelope_sender} = $self->{resent_by};

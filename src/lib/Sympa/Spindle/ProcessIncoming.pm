@@ -32,6 +32,7 @@ use File::Copy qw();
 
 use Sympa;
 use Conf;
+use Sympa::DKIM2;
 use Sympa::Language;
 use Sympa::List;
 use Sympa::Log;
@@ -202,6 +203,10 @@ sub _twist {
     $message->aggregate_authentication_results;
     # Check S/MIME signature.
     $message->check_smime_signature;
+    # DKIM2: record the message as received, before decryption or any
+    # other change.
+    Sympa::DKIM2::ingress($message);
+
     # Decrypt message.  On success, check nested S/MIME signature.
     if ($message->smime_decrypt and not $message->{'smime_signed'}) {
         $message->check_smime_signature;

@@ -108,6 +108,7 @@ nonCLI_modules = \
 	Sympa/DataSource/RemoteDump.pm \
 	Sympa/DataSource/RemoteFile.pm \
 	Sympa/DataSource/SQL.pm \
+	Sympa/DKIM2.pm \
 	Sympa/Family.pm \
 	Sympa/HTML/FormatText.pm \
 	Sympa/HTML/URIFind.pm \

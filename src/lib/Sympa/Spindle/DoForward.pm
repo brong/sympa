@@ -31,6 +31,7 @@ use warnings;
 
 use Sympa;
 use Conf;
+use Sympa::DKIM2;
 use Sympa::Log;
 use Sympa::Mailer;
 use Sympa::Tools::DKIM;
@@ -169,8 +170,11 @@ sub _twist {
         or (grep { 'dkim_authenticated_messages' eq $_ } @apply_on
         and $message->{'dkim_pass'});
 
+    # DKIM2 lists always rewrite From (Sympa::DKIM2::rewrites_from).
     $message->{shelved}{dmarc_protect} = 1
-        if grep { $_ and 'none' ne $_ } @protection;
+        if grep { $_ and 'none' ne $_ } @protection
+        or (ref $list eq 'Sympa::List'
+        and Sympa::DKIM2::rewrites_from($list));
 
     # Add or remove several headers to forward message safely.
     # - Add X-Loop: field to mitigate mail looping.

@@ -34,6 +34,7 @@ use English;    # FIXME: drop $PREMATCH usage
 use File::Path qw();
 use HTML::TreeBuilder;
 use Mail::Address;
+use MIME::Base64 qw();
 use MIME::Charset;
 use MIME::EncWords;
 use MIME::Entity;
@@ -50,6 +51,7 @@ BEGIN { eval 'use Net::DNS'; }
 use Sympa;
 use Conf;
 use Sympa::Constants;
+use Sympa::DKIM2;
 use Sympa::HTML::FormatText;
 use Sympa::HTML::URIFind;
 use Sympa::HTMLSanitizer;
@@ -118,6 +120,8 @@ sub new {
             };
         } elsif ($k eq 'X-Sympa-Spam-Status') {     # New in 6.2a.41
             $self->{'spam_status'} = $v;
+        } elsif ($k eq 'X-Sympa-DKIM2-Headers') {
+            $self->{'dkim2_headers'} = MIME::Base64::decode_base64($v);
         } else {
             $log->syslog('err', 'Unknown attribute information: "%s: %s"',
                 $k, $v);
@@ -388,6 +392,10 @@ sub to_string {
     if (defined $self->{'spam_status'}) {     # New in 6.2a.41.
         $serialized .= sprintf "X-Sympa-Spam-Status: %s\n",
             $self->{'spam_status'};
+    }
+    if (defined $self->{'dkim2_headers'}) {
+        $serialized .= sprintf "X-Sympa-DKIM2-Headers: %s\n",
+            MIME::Base64::encode_base64($self->{'dkim2_headers'}, '');
     }
     # This terminates pseudo-header part for attributes.
     unless (defined $self->{'envelope_sender'}) {
@@ -909,6 +917,19 @@ sub as_string {
 sub body_as_string {
     my $self = shift;
     return $self->{_body};
+}
+
+# The message as it goes on the wire, for DKIM2 hashing: header fields
+# (no Sympa pseudo-headers, no synthesized Return-Path), a blank line and
+# the body, with CRLF line ends.
+sub as_rfc822_string {
+    my $self = shift;
+
+    die 'Bug in logic.  Ask developer' unless $self->{_head};
+    my $string = $self->{_head}->as_string . "\n"
+        . (defined $self->{_body} ? $self->{_body} : '');
+    $string =~ s/\r?\n/\r\n/g;
+    return $string;
 }
 
 sub header_as_string {
@@ -1779,6 +1800,18 @@ sub decorate {
     my %options = @_;
 
     return unless ref $list eq 'Sympa::List';
+
+    # DKIM2 lists wrap the original body in a MIME container instead of
+    # editing it (Sympa::DKIM2).  Should wrapping fail (it changes nothing
+    # then), decorate as usual and mark the body as rewritten.
+    if (defined $self->{'dkim2_headers'} and Sympa::DKIM2::enabled($list)) {
+        my $ret = eval { Sympa::DKIM2::wrap($self, $list, $rcpt, %options) };
+        return $ret unless $EVAL_ERROR;
+        $log->syslog('err',
+            'DKIM2 wrap failed for %s, decorating in place: %s',
+            $self, $EVAL_ERROR);
+        $self->{_dkim2_body_rewritten} = 1;
+    }
 
     my $entity = $self->as_entity->dup;
     my $mode = $options{mode} || '';
@@ -3288,20 +3321,25 @@ sub dmarc_protect {
     my $list = $self->{context};
     return unless ref $list eq 'Sympa::List';
 
-    return unless $list->{'admin'}{'dmarc_protection'};
-    my @modes = @{$list->{'admin'}{'dmarc_protection'}{'mode'} || []};
-    return unless grep { $_ and $_ ne 'none' } @modes;
+    # DKIM2 lists always rewrite From: it must be Authentic for the list
+    # host's signature (Sympa::DKIM2::rewrites_from).
+    my $dkim2 = Sympa::DKIM2::rewrites_from($list);
+    my $dp    = $list->{'admin'}{'dmarc_protection'} || {};
+    my @modes = @{$dp->{'mode'} || []};
+    return unless $dkim2 or grep { $_ and $_ ne 'none' } @modes;
     $log->syslog('debug', 'DMARC protection on');
 
     my $dkim_signature = $self->get_header('DKIM-Signature');
-    my $domain_regex   = $list->{'admin'}{'dmarc_protection'}{'domain_regex'};
+    my $domain_regex   = $dp->{'domain_regex'};
 
     my $original_from = $self->get_header('From');
     my ($origName, $from_address) = _parse_nameaddr($original_from);
     $log->syslog('debug', 'From address: <%s>', $from_address);
 
     # Will this message be processed?
-    if (grep { $_ eq 'all' } @modes) {
+    if ($dkim2) {
+        $log->syslog('debug', 'Munging From for a DKIM2 list');
+    } elsif (grep { $_ eq 'all' } @modes) {
         $log->syslog('debug', 'Munging From for ALL messages');
     } elsif (
         $dkim_signature and grep {
@@ -3339,8 +3377,7 @@ sub dmarc_protect {
     }
 
     # Identify default new From address
-    my $phraseMode = $list->{'admin'}{'dmarc_protection'}{'phrase'}
-        || 'name_via_list';
+    my $phraseMode = $dp->{'phrase'} || 'name_via_list';
     my $newName;
     my $newComment;
     my $anonaddr;
@@ -3349,7 +3386,7 @@ sub dmarc_protect {
         # -request or -editor address
         $anonaddr = Sympa::get_address($list, $listtype);
     } else {
-        $anonaddr = $list->{'admin'}{'dmarc_protection'}{'other_email'};
+        $anonaddr = $dp->{'other_email'};
         $anonaddr = Sympa::get_address($list)
             unless $anonaddr and $anonaddr =~ /\@/;
         my @anonFrom = Mail::Address->parse($anonaddr);
@@ -3357,6 +3394,9 @@ sub dmarc_protect {
             $anonaddr   = $anonFrom[0]->address;
             $anonphrase = $anonFrom[0]->phrase;
         }
+        Sympa::DKIM2::check_from_address($list, $anonaddr,
+            'dmarc_protection.other_email')
+            if $dkim2 and $dp->{'other_email'};
     }
     $log->syslog('debug', 'Anonymous From: %s', $anonaddr);
 
@@ -3898,6 +3938,15 @@ Gets header part of the message as string.
 
 Note that the result won't be decoded nor unfolded.
 
+=item as_rfc822_string ( )
+
+I<Instance method>.
+Gets the message as it goes on the wire, for DKIM2 hashing:
+the header fields (without pseudo-header fields and without the
+C<Return-Path:> field L</to_string> adds), a blank line and the body, with CRLF line ends.
+
+Note that the result won't be decoded.
+
 =item get_header ( $field, [ $sep ] )
 
 I<Instance method>.
@@ -4293,6 +4342,9 @@ String.
 
 I<Instance method>.
 Munges the C<From:> header field if we are using DMARC Protection mode.
+On a list with C<dkim2_message_instance> on (and no C<anonymous_sender>),
+always munges it, whatever C<dmarc_protection.mode> says: DKIM2 requires
+From to be Authentic for the list host's signature.  See L<Sympa::DKIM2>.
 
 Parameters:
 
@@ -4382,6 +4434,16 @@ These are accessible as hash elements of objects.
 No longer used.  It is kept for compatibility with Sympa 6.1.x or earlier.
 See also L<sympa upgrade incoming|sympa-upgrade-incoming(1)> command line.
 
+=item {dkim2_headers}
+
+The header block of the message as received, after ingress added its
+DKIM2 C<Message-Instance> (if any): header fields with C<"\n"> line ends,
+no body.  Set by L<Sympa::DKIM2/ingress> on lists with
+C<dkim2_message_instance> on, and used at egress to compute the header
+Recipe of the next instance.  Serialized as the C<X-Sympa-DKIM2-Headers:>
+pseudo-header field, whose value is the block in base64 without line
+breaks.  Never stored in archives.
+
 =item {envelope_sender}
 
 Envelope sender, a.k.a. "Unix From".
@@ -4444,6 +4506,12 @@ with the messages stored into outgoing spool by earlier version of Sympa.
 
 Adding DKIM signature.
 
+=item dkim2_strip =E<gt> 1
+
+Removing the DKIM2 chain (C<DKIM2-Signature:>, C<Message-Instance:>,
+C<X-DKIM2-Info:>) at egress.  Set when a message is resent from the
+archive on a list with C<dkim2_message_instance> on.  See L<Sympa::DKIM2>.
+
 =item dmarc_protect =E<gt> 1
 
 DMARC protection.  See also L</dmarc_protect>().
@@ -4499,6 +4567,7 @@ Below is an example of serialized form.
   X-Sympa-Display-Name: Infant                    : {gecos} attribute
   X-Sympa-Shelved: dkim_sign; tracking=mdn        : {shelved} attribute
   X-Sympa-Spam-Status: ham                        : {spam_status} attribute
+  X-Sympa-DKIM2-Headers: RnJvbTogSW5mYW50...      : {dkim2_headers} attribute
   Return-Path: sympa-request@domain.name          : {envelope_sender} attribute
   Message-Id: <123456789.12345@domain.name>       :   ---
   From: Infant <user@other.host.dom>              :    |
