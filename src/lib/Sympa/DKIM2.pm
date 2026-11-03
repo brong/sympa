@@ -67,7 +67,7 @@ sub anonymous {
 }
 
 # True if From is to be rewritten to an address of the list (as
-# dmarc_protect does) whatever dmarc_protection says.  DKIM2 (-08 section
+# dmarc_protect does) whatever dmarc_protection says.  DKIM2 (-09 section
 # 11) requires From to be Authentic: in the list's signing domain when the
 # list host signs i=1, or when its hop changes the message.  Sympa's hop
 # always changes a list post (Sender, Precedence, List-Id ...), and a
@@ -144,9 +144,9 @@ sub egress_context {
         return undef;
     }
     # Arrived unsigned: the list host's signature will be i=1, and i=1 is
-    # checked against the From of state 1 (-08 section 11), which Sympa
+    # checked against the From of state 1 (-09 section 11), which Sympa
     # rewrites.  So the copy leaves with a single instance, m=1, describing
-    # it as sent, with a Recipe back to the message as received (-08
+    # it as sent, with a Recipe back to the message as received (-09
     # section 12.1: the first instance may record changes made as the
     # message enters DKIM2); see egress_add.
     my $unsigned = $message->{'dkim2_headers'} !~ /^DKIM2-Signature:/mi;
@@ -345,9 +345,9 @@ sub _strip_chain {
 }
 
 # DKIM2 implementation metadata -- update DKIM2_DATE on each change.
-use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-08';
+use constant DKIM2_DRAFT    => 'ietf-dkim-dkim2-spec-09';
 use constant DKIM2_REPO     => 'github.com/brong/sympa';
-use constant DKIM2_DATE     => '2026-10-28';
+use constant DKIM2_DATE     => '2026-11-03';
 use constant DKIM2_SOFTWARE => 'sympa';
 
 # X-DKIM2-Info value per draft-gondwana-dkim2-debug-header-01: a tag-list in
@@ -573,7 +573,7 @@ Sympa::DKIM2 - DKIM2 Message-Instance support
 =head1 DESCRIPTION
 
 Records what a list changed in each message as a DKIM2 Message-Instance
-header field (draft-ietf-dkim-dkim2-spec-08), so DKIM2 verifiers downstream
+header field (draft-ietf-dkim-dkim2-spec-09), so DKIM2 verifiers downstream
 can undo the list's changes and check the signatures of earlier hops.  The
 DKIM2-Signature itself is added by the MTA.
 
@@ -585,7 +585,7 @@ editing it, so the body Recipe is a copy range; a body rewritten for any
 other reason gets a null body Recipe.  Each instance Sympa adds has an
 C<X-DKIM2-Info> debug field directly above it.
 
-DKIM2 requires the From header field to be Authentic (-08 section 11): in
+DKIM2 requires the From header field to be Authentic (-09 section 11): in
 the domain of the signature of the hop that last set it.  Every post a
 DKIM2 list sends out has its From rewritten to the list address (see
 L<Sympa::Message/dmarc_protect>), whatever C<dmarc_protection> says; the

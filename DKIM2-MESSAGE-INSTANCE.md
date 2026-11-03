@@ -201,9 +201,10 @@ The test is always against the body hash in the top instance's `h=`, so a
 body change Sympa did not anticipate still gives a correct, if null,
 Recipe rather than a wrong one.
 
-An outbound `dkim2-milter` refuses to sign a message whose top instance
-has a null body Recipe unless it is started with `--allow-null-body-recipe`.
-A list host running Sympa needs that option on its outbound signer.
+An outbound signer on Mail::DKIM2 0.29 or later signs over the list's own
+null body Recipe (its `--allow-null-body-recipe` is deprecated and does
+nothing), but under draft -09 such a copy is a PERMERROR at every verifier
+("has a null recipe"), so a DKIM2 list should avoid rewriting bodies.
 
 ### X-DKIM2-Info
 

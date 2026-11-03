@@ -720,7 +720,7 @@ subtest 'X-DKIM2-Info above each instance Sympa adds' => sub {
     my ($info) = $w =~ /\AX-DKIM2-Info: (.*?)\r\n(?![ \t])/s;
     $info =~ s/\r\n[ \t]+/ /g;
     like $info, qr/\A(?:[a-z0-9-]+=[^;]*; ?)+\z/, 'tag-list, every tag ends in ;';
-    like $info, qr/draft=ietf-dkim-dkim2-spec-08;/, 'draft';
+    like $info, qr/draft=ietf-dkim-dkim2-spec-09;/, 'draft';
     like $info, qr/hc=\d+; hn=[a-z0-9,-]+;/, 'hashed header count and names';
 };
 
